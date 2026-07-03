@@ -1,0 +1,5 @@
+allowBuilds:
+  '@ampproject/toolbox-optimizer': false
+  es5-ext: false
+  fsevents: false
+  unrs-resolver: false

@@ -1,0 +1,104 @@
+@import "tailwindcss";
+
+:root {
+  /* Space³ token system — "fog and signal": a quiet, overcast palette
+     with one warm amber accent standing in for presence/availability,
+     the one thing this product is actually about. */
+  --color-fog: #e9ecf1;
+  --color-fog-deep: #dde1e8;
+  --color-paper: #fbfbfa;
+  --color-ink: #1c232e;
+  --color-ink-soft: #5b6472;
+  --color-ink-faint: #8890a0;
+  --color-line: #d5d9e0;
+  --color-amber: #d69a3c;
+  --color-amber-soft: #f2e3c6;
+  --color-teal: #3f6b69;
+  --color-teal-soft: #dde9e8;
+  --color-danger: #a8503f;
+}
+
+@theme inline {
+  --color-fog: var(--color-fog);
+  --color-fog-deep: var(--color-fog-deep);
+  --color-paper: var(--color-paper);
+  --color-ink: var(--color-ink);
+  --color-ink-soft: var(--color-ink-soft);
+  --color-ink-faint: var(--color-ink-faint);
+  --color-line: var(--color-line);
+  --color-amber: var(--color-amber);
+  --color-amber-soft: var(--color-amber-soft);
+  --color-teal: var(--color-teal);
+  --color-teal-soft: var(--color-teal-soft);
+  --color-danger: var(--color-danger);
+}
+
+/* Font stacks: designed to be swapped for Fraunces / Inter / IBM Plex Mono
+   via next/font/google once deployed somewhere with open network access —
+   this sandbox blocks fonts.googleapis.com, so we fall back to close
+   system equivalents (Charter/Iowan for the display serif) for now. */
+body {
+  background: var(--color-fog);
+  color: var(--color-ink);
+  font-family: ui-sans-serif, "Inter", system-ui, -apple-system, sans-serif;
+}
+
+h1, h2, h3, .font-display {
+  font-family: "Iowan Old Style", "Palatino Linotype", Georgia, "Fraunces", serif;
+  letter-spacing: -0.01em;
+}
+
+.font-mono-tag {
+  font-family: ui-monospace, "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+  letter-spacing: 0.02em;
+}
+
+/* Signature element: the presence dot. A small warm pulse standing in
+   for "someone is around" — used next to active members and fresh
+   messages instead of a generic "online" badge. */
+.presence-dot {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-amber);
+  flex-shrink: 0;
+}
+
+.presence-dot::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 999px;
+  background: var(--color-amber);
+  opacity: 0.35;
+  animation: presence-pulse 2.4s ease-out infinite;
+}
+
+@keyframes presence-pulse {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.45;
+  }
+  70% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .presence-dot::after {
+    animation: none;
+    opacity: 0.2;
+  }
+}
+
+::selection {
+  background: var(--color-amber-soft);
+  color: var(--color-ink);
+}

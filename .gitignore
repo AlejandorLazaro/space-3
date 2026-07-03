@@ -1,0 +1,22 @@
+# Dotfiles
+.claude
+.local
+.env*
+
+# Node
+node_modules/
+
+# Next.js
+.next
+out
+
+# OSX
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# VSCode
+.vscode/
+
+# Environments
+ENV
