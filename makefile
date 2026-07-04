@@ -1,4 +1,8 @@
 run_site:
-	@pnpm run dev & \
+	@bash -c '\
+		trap "kill 0" EXIT INT TERM; \
+		pnpm run dev & \
 		sleep 2; \
-		open http://localhost:3000
+		open http://localhost:3000; \
+		wait \
+	'

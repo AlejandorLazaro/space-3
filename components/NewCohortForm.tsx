@@ -51,7 +51,7 @@ export default function NewCohortForm() {
       setError(error.message);
       return;
     }
-    router.push(`/groups/${data.id}`);
+    router.push(`/groups?id=${data.id}`);
   }
 
   return (
