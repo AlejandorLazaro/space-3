@@ -27,6 +27,11 @@ export default function GroupsPage() {
         return;
       }
 
+      // No visibility filter needed here -- RLS's cohorts_select policy
+      // already restricts this query to public cohorts plus any cohort the
+      // caller is an active member of (see 002_cohort_privacy_rls.sql).
+      // "My cohorts" vs. "Discover" below is purely a membership-based split
+      // of the one query result, not a second, differently-filtered query.
       const [{ data: cohorts }, { data: memberships }, { data: applications }] =
         await Promise.all([
           supabase.from("cohorts").select("*").order("created_at", { ascending: false }),
@@ -64,9 +69,14 @@ export default function GroupsPage() {
         <main className="mx-auto max-w-3xl px-5 py-8">
             <div className="mb-8 flex items-center justify-between">
             <h1 className="font-display text-2xl">My cohorts</h1>
-            <Link href="/groups/new">
+            <div className="flex gap-2">
+                <Link href="/join">
+                <Button variant="ghost">Have an invite code?</Button>
+                </Link>
+                <Link href="/groups/new">
                 <Button variant="secondary">+ New cohort</Button>
-            </Link>
+                </Link>
+            </div>
             </div>
 
             {myCohorts.length === 0 ? (
@@ -111,6 +121,9 @@ export default function GroupsPage() {
                     <div className="flex items-center gap-2">
                         <h2 className="font-display text-lg">{cohort.name}</h2>
                         <Tag>{cohort.context_type}</Tag>
+                        {cohort.admission_mode === "invite_only" && (
+                        <Tag tone="amber">invite only</Tag>
+                        )}
                     </div>
                     {cohort.description && (
                         <p className="mt-1 text-sm text-[var(--color-ink-soft)]">
@@ -123,10 +136,15 @@ export default function GroupsPage() {
                         </p>
                     )}
                     </div>
+                    {/* invite_only cohorts don't accept organic applications --
+                        apply_to_cohort would reject with cohort_is_invite_only
+                        anyway, so don't render a button implying it'll work. */}
+                    {cohort.admission_mode === "apply" && (
                     <ApplyButton
-                    cohortId={cohort.id}
-                    alreadyPending={pendingCohortIds.has(cohort.id)}
+                        cohortId={cohort.id}
+                        alreadyPending={pendingCohortIds.has(cohort.id)}
                     />
+                    )}
                 </Card>
                 ))}
             </div>

@@ -6,6 +6,9 @@ export type ContextType =
   | "interest"
   | "other";
 
+export type CohortVisibility = "public" | "private";
+export type CohortAdmissionMode = "apply" | "invite_only";
+
 export type Cohort = {
   id: string;
   name: string;
@@ -14,6 +17,8 @@ export type Cohort = {
   context_type: ContextType;
   created_by: string;
   created_at: string;
+  visibility: CohortVisibility;
+  admission_mode: CohortAdmissionMode;
 };
 
 export type Membership = {
@@ -33,7 +38,20 @@ export type Application = {
   reviewed_by: string | null;
   reviewed_at: string | null;
   submitted_at: string;
+  invited_by: string | null;
   profiles?: { display_name: string } | null;
+};
+
+export type CohortInvite = {
+  id: string;
+  cohort_id: string;
+  code: string;
+  created_by: string;
+  created_at: string;
+  expires_at: string | null;
+  max_uses: number | null;
+  use_count: number;
+  revoked: boolean;
 };
 
 export type Message = {
