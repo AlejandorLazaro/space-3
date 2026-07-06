@@ -4,7 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import TopBar from "@/components/TopBar";
-import { Card, Button } from "@/components/ui";
+import { Card, Button, Input, Label } from "@/components/ui";
 import RequireAuth from "@/components/RequireAuth";
 
 const RPC_ERROR_COPY: Record<string, string> = {
@@ -26,27 +26,34 @@ type RedeemResult = {
   joined: boolean;
 };
 
+type Status = "needs_code" | "loading" | "error" | "joined" | "route_to_apply";
+
 function JoinPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const code = searchParams.get("code");
 
-  const [status, setStatus] = useState<"loading" | "error" | "joined" | "route_to_apply">(
-    "loading"
-  );
+  const [status, setStatus] = useState<Status>("loading");
   const [error, setError] = useState<string | null>(null);
   const [cohortName, setCohortName] = useState<string | null>(null);
+  const [codeInput, setCodeInput] = useState("");
+  const [checking, setChecking] = useState(false);
 
   useEffect(() => {
     if (!code) {
-      setStatus("error");
-      setError("No invite code was provided.");
+      // No code in the URL -- show the entry form instead of a dead-end
+      // error. This is the actual landing state for "Have an invite code?"
+      // (app/groups/page.tsx), which links here with no query param at all.
+      setStatus("needs_code");
       return;
     }
 
     const supabase = createClient();
 
     (async () => {
+      setStatus("loading");
+      setError(null);
+
       const {
         data: { user },
       } = await supabase.auth.getUser();
@@ -65,34 +72,60 @@ function JoinPageInner() {
       if (result.mode === "invite_only") {
         setStatus("joined");
         setCohortName(result.cohort_name ?? null);
-        // Brief pause so the "You're in" state is actually visible before
-        // navigating away.
         setTimeout(() => {
           router.replace(`/groups/detail?id=${result.cohort_id}`);
         }, 1200);
         return;
       }
 
-      // mode === "apply": don't consume the invite here -- hand off to the
-      // cohort detail page with `ref` pre-filled so ApplyButton can pass it
-      // through to apply_to_cohort. use_count only increments on approval
-      // in this mode (see redeem_invite in 002_cohort_privacy_rls.sql).
       setStatus("route_to_apply");
       router.replace(`/groups/detail?id=${result.cohort_id}&ref=${result.ref}`);
     })();
   }, [code, router]);
+
+  function handleSubmitCode(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = codeInput.trim().toUpperCase();
+    if (!trimmed) return;
+    setChecking(true);
+    // Pushing ?code= re-triggers the effect above with the new searchParams
+    // value -- no need to duplicate the redeem_invite call here.
+    router.push(`/join?code=${trimmed}`);
+  }
 
   return (
     <div className="min-h-screen bg-[var(--color-fog)]">
       <TopBar />
       <main className="mx-auto max-w-md px-5 py-16">
         <Card className="p-8 text-center">
+          {status === "needs_code" && (
+            <form onSubmit={handleSubmitCode} className="text-left">
+              <p className="mb-4 text-center text-[var(--color-ink-soft)]">
+                Enter the invite code someone shared with you.
+              </p>
+              <Label>Invite code</Label>
+              <Input
+                autoFocus
+                required
+                placeholder="e.g. 7F3K9QXH"
+                value={codeInput}
+                onChange={(e) => setCodeInput(e.target.value)}
+                maxLength={8}
+                className="text-center font-mono-tag tracking-widest uppercase"
+              />
+              <Button type="submit" disabled={checking} className="mt-4 w-full">
+                {checking ? "Checking…" : "Join"}
+              </Button>
+            </form>
+          )}
           {status === "loading" && (
             <p className="text-[var(--color-ink-soft)]">Checking your invite…</p>
           )}
           {status === "joined" && (
             <>
-              <p className="font-display text-lg">You&rsquo;re in{cohortName ? `, ${cohortName}` : ""}!</p>
+              <p className="font-display text-lg">
+                You&rsquo;re in{cohortName ? `, ${cohortName}` : ""}!
+              </p>
               <p className="mt-1 text-sm text-[var(--color-ink-soft)]">Taking you there now…</p>
             </>
           )}
@@ -105,9 +138,13 @@ function JoinPageInner() {
               <Button
                 variant="secondary"
                 className="mt-4"
-                onClick={() => router.replace("/groups")}
+                onClick={() => {
+                  setCodeInput("");
+                  setChecking(false);
+                  router.replace("/join");
+                }}
               >
-                Back to cohorts
+                Try another code
               </Button>
             </>
           )}

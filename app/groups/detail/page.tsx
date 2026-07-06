@@ -255,7 +255,6 @@ function CohortDetailPageInner() {
                     <Card className="divide-y divide-[var(--color-line)]">
                     {members.map((m) => (
                         <div key={m.user_id} className="flex items-center gap-2 px-3 py-2 text-sm">
-                        <span className="presence-dot" aria-hidden />
                         <span>{m.display_name}</span>
                         {m.role === "admin" && <Tag tone="amber">admin</Tag>}
                         </div>

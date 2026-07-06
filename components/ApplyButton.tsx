@@ -13,6 +13,7 @@ const RPC_ERROR_COPY: Record<string, string> = {
     "This is a private cohort. You'll need an invite link from a current member to apply.",
   invalid_ref:
     "That invite link's referrer is no longer an active member, so it can't be used to apply here.",
+  already_a_member: "You're already a member of this cohort.",
 };
 
 function friendlyRpcError(message: string): string {

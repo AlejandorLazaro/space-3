@@ -92,7 +92,6 @@ export default function GroupsPage() {
                     <Card className="flex items-center justify-between p-4 transition-colors hover:border-[var(--color-ink-faint)]">
                     <div>
                         <div className="flex items-center gap-2">
-                        <span className="presence-dot" aria-hidden />
                         <h2 className="font-display text-lg">{cohort.name}</h2>
                         </div>
                         {cohort.description && (
