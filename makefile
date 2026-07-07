@@ -6,3 +6,6 @@ run_site:
 		open http://localhost:3000; \
 		wait \
 	'
+
+build_and_run:
+	pnpm run build && make run_site
