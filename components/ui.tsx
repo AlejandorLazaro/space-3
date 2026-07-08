@@ -1,28 +1,59 @@
-import { ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes } from "react";
+import {
+  AnchorHTMLAttributes,
+  ButtonHTMLAttributes,
+  InputHTMLAttributes,
+  TextareaHTMLAttributes,
+} from "react";
 import clsx from "clsx";
+
+type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
+
+function buttonClasses(variant: ButtonVariant, className?: string) {
+  return clsx(
+    "inline-flex items-center justify-center gap-1.5 rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-amber)]",
+    variant === "primary" &&
+      "bg-[var(--color-ink)] text-[var(--color-paper)] hover:bg-[var(--color-ink)]/85",
+    variant === "secondary" &&
+      "bg-[var(--color-paper)] text-[var(--color-ink)] border border-[var(--color-line)] hover:border-[var(--color-ink-faint)]",
+    variant === "ghost" &&
+      "text-[var(--color-ink-soft)] hover:text-[var(--color-ink)] hover:bg-black/5",
+    variant === "danger" &&
+      "bg-[var(--color-danger)] text-[var(--color-paper)] hover:bg-[var(--color-danger)]/85",
+    className
+  );
+}
+
+type ButtonAsButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant;
+  href?: undefined;
+};
+
+type ButtonAsAnchorProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
+  variant?: ButtonVariant;
+  /** Passing href renders a real <a> (for external links / protocol handoffs like webcal://) with identical styling to the button. */
+  href: string;
+};
 
 export function Button({
   className,
   variant = "primary",
+  href,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & {
-  variant?: "primary" | "secondary" | "ghost" | "danger";
-}) {
+}: ButtonAsButtonProps | ButtonAsAnchorProps) {
+  const classes = buttonClasses(variant, className);
+  if (href !== undefined) {
+    return (
+      <a
+        href={href}
+        className={classes}
+        {...(props as AnchorHTMLAttributes<HTMLAnchorElement>)}
+      />
+    );
+  }
   return (
     <button
-      className={clsx(
-        "inline-flex items-center justify-center gap-1.5 rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-amber)]",
-        variant === "primary" &&
-          "bg-[var(--color-ink)] text-[var(--color-paper)] hover:bg-[var(--color-ink)]/85",
-        variant === "secondary" &&
-          "bg-[var(--color-paper)] text-[var(--color-ink)] border border-[var(--color-line)] hover:border-[var(--color-ink-faint)]",
-        variant === "ghost" &&
-          "text-[var(--color-ink-soft)] hover:text-[var(--color-ink)] hover:bg-black/5",
-        variant === "danger" &&
-          "bg-[var(--color-danger)] text-[var(--color-paper)] hover:bg-[var(--color-danger)]/85",
-        className
-      )}
-      {...props}
+      className={classes}
+      {...(props as ButtonHTMLAttributes<HTMLButtonElement>)}
     />
   );
 }
