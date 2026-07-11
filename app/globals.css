@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@source "../node_modules/@ilamy/calendar/dist";
+
 :root {
   /* Space³ token system — "fog and signal": a quiet, overcast palette
      with one warm amber accent standing in for presence/availability,
@@ -31,6 +33,36 @@
   --color-teal: var(--color-teal);
   --color-teal-soft: var(--color-teal-soft);
   --color-danger: var(--color-danger);
+}
+
+@theme {
+  --color-background: var(--color-paper);
+  --color-foreground: var(--color-ink);
+
+  --color-card: var(--color-paper);
+  --color-card-foreground: var(--color-ink);
+
+  --color-popover: var(--color-paper);
+  --color-popover-foreground: var(--color-ink);
+
+  --color-primary: var(--color-ink);
+  --color-primary-foreground: var(--color-paper);
+
+  --color-secondary: var(--color-paper);
+  --color-secondary-foreground: var(--color-ink);
+
+  --color-muted: var(--color-line);
+  --color-muted-foreground: var(--color-ink-soft);
+
+  --color-accent: var(--color-teal-soft);
+  --color-accent-foreground: var(--color-teal);
+
+  --color-destructive: var(--color-danger);
+  --color-destructive-foreground: var(--color-paper);
+
+  --color-border: var(--color-line);
+  --color-input: var(--color-line);
+  --color-ring: var(--color-amber);
 }
 
 /* Font stacks: designed to be swapped for Fraunces / Inter / IBM Plex Mono

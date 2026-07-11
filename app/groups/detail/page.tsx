@@ -11,6 +11,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import ApplyButton from "@/components/ApplyButton";
 import ChatPanel from "@/components/ChatPanel";
 import RequireAuth from "@/components/RequireAuth";
+import UpcomingEventsWidget from "@/components/groups/UpcomingEventsWidget";
 
 type Member = { user_id: string; display_name: string; role: string };
 
@@ -236,6 +237,15 @@ function CohortDetailPageInner() {
                 {/* Applications, Invites, and Settings all live at
                     /groups/manage now (see D6/D7) -- one entry point instead
                     of a growing list of sidebar links. */}
+                <Link
+                    href={`/calendar?cohortId=${cohort.id}`}
+                    className="flex items-center justify-between rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] px-3 py-2 text-sm hover:border-[var(--color-ink-faint)]"
+                >
+                    <span>📅 Calendar</span>
+                </Link>
+
+                <UpcomingEventsWidget cohortId={cohort.id} />
+
                 <Link
                     href={`/groups/manage?id=${cohort.id}`}
                     className="flex items-center justify-between rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] px-3 py-2 text-sm hover:border-[var(--color-ink-faint)]"
