@@ -19,6 +19,16 @@ export interface EventRow {
 
 export interface EventWithCohort extends EventRow {
   cohorts: { name: string } | null;
+  // Reverse FK (chats.event_id -> events.id) — Supabase/PostgREST may return
+  // this as an array even though 016's partial unique index guarantees at
+  // most one row; extractChatId() below handles both shapes defensively.
+  chats: { id: string } | { id: string }[] | null;
+}
+
+export function extractChatId(chats: EventWithCohort["chats"]): string | null {
+  if (!chats) return null;
+  if (Array.isArray(chats)) return chats[0]?.id ?? null;
+  return chats.id ?? null;
 }
 
 export interface RsvpRow {
@@ -48,7 +58,7 @@ export async function fetchCalendarEvents(cohortId?: string): Promise<EventWithC
   const supabase = createClient();
   let query = supabase
     .from("events")
-    .select("*, cohorts(name)")
+    .select("*, cohorts(name), chats(id)")
     .not("starts_at", "is", null)
     .order("starts_at", { ascending: true });
 

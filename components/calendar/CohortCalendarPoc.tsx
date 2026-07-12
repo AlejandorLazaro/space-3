@@ -13,10 +13,13 @@ import {
   updateEvent,
   deleteEvent,
   insertEvent,
+  extractChatId,
   type EventWithCohort,
   type RsvpStatus,
 } from "@/lib/calendar/events";
 import { fetchEventRsvps, upsertRsvp, type RsvpWithProfile } from "@/lib/calendar/rsvps";
+import { createEventChat } from "@/lib/calendar/chats";
+import ChatPanel from "@/components/ChatPanel";
 import {
   fetchRecurringAvailability,
   fetchAvailabilityOverrides,
@@ -51,6 +54,8 @@ interface PocEventData {
   rawTitle?: string;
   description?: string | null;
   location?: string | null;
+  /** This event's dedicated coordination chat (016_chat_levels.sql) — null if creation's second insert (createEventChat) failed. */
+  chatId?: string | null;
   [key: string]: unknown; // required for structural compatibility with CalendarEvent['data']
 }
 
@@ -95,6 +100,7 @@ function groupRowToCalendarEvent(
       layer: "group",
       editable: currentUserId != null && row.created_by === currentUserId,
       cohortId: row.cohort_id,
+      chatId: extractChatId(row.chats),
       cohortName,
       rawTitle: row.title,
       description: row.description,
@@ -140,6 +146,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
   // Read/Update/Delete modal state
   const [selectedEvent, setSelectedEvent] = useState<PocCalendarEvent | null>(null);
   const [editing, setEditing] = useState(false);
+  const [modalTab, setModalTab] = useState<"details" | "chat">("details");
   const [savingEdit, setSavingEdit] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -324,9 +331,26 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
           ends_at: dayjs(added.end).toISOString(),
           color: pickedColor,
         });
+
+        let chatId: string | null = null;
+        try {
+          chatId = await createEventChat({
+            cohort_id: cohortId,
+            event_id: inserted.id,
+            title: inserted.title,
+            created_by: currentUserId,
+          });
+        } catch (chatErr) {
+          // The event itself was created successfully — don't fail the
+          // whole creation over the chat. Degrades to "no chat tab for this
+          // event" rather than losing the event entirely.
+          console.error("Event created, but its chat could not be created:", chatErr);
+          setError("Event created, but its chat couldn't be set up.");
+        }
+
         const mapped = groupRowToCalendarEvent(inserted, currentUserId);
         if (mapped) {
-          setGroupEvents((prev) => [...prev, mapped]);
+          setGroupEvents((prev) => [...prev, { ...mapped, data: { ...mapped.data, chatId } }]);
         }
       } catch (err) {
         console.error("Failed to create event:", err);
@@ -359,6 +383,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
       data,
     });
     setEditing(false);
+    setModalTab("details");
   }, []);
 
   // Deep-link support: auto-open the event named in ?eventId= once it's
@@ -372,6 +397,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
     if (match) {
       setSelectedEvent(match);
       setEditing(false);
+      setModalTab("details");
       autoOpenedRef.current = true;
     }
   }, [groupEvents, initialEventId]);
@@ -603,10 +629,40 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                     {selectedEvent.data.cohortName as string}
                   </p>
                 )}
-                <p className="mt-2 text-sm text-[var(--color-ink-soft)]">
-                  {selectedEvent.start.format("ddd, MMM D, h:mm A")} –{" "}
-                  {selectedEvent.end.format("h:mm A")}
-                </p>
+
+                <div className="mt-3 flex gap-2 border-b border-[var(--color-line)]">
+                  <button
+                    type="button"
+                    onClick={() => setModalTab("details")}
+                    className={
+                      "px-2 pb-2 text-sm " +
+                      (modalTab === "details"
+                        ? "border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]"
+                        : "text-[var(--color-ink-faint)]")
+                    }
+                  >
+                    Details
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setModalTab("chat")}
+                    className={
+                      "px-2 pb-2 text-sm " +
+                      (modalTab === "chat"
+                        ? "border-b-2 border-[var(--color-ink)] text-[var(--color-ink)]"
+                        : "text-[var(--color-ink-faint)]")
+                    }
+                  >
+                    Chat
+                  </button>
+                </div>
+
+                {modalTab === "details" ? (
+                  <>
+                    <p className="mt-3 text-sm text-[var(--color-ink-soft)]">
+                      {selectedEvent.start.format("ddd, MMM D, h:mm A")} –{" "}
+                      {selectedEvent.end.format("h:mm A")}
+                    </p>
                 {selectedEvent.data.location && (
                   <p className="mt-1 text-sm text-[var(--color-ink-soft)]">
                     📍 {selectedEvent.data.location as string}
@@ -668,6 +724,25 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                     </ul>
                   )}
                 </div>
+                  </>
+                ) : (
+                  <div className="mt-3">
+                    {selectedEvent.data.chatId ? (
+                      <ChatPanel
+                        currentUserId={currentUserId ?? ""}
+                        chatId={selectedEvent.data.chatId as string}
+                        title="Event chat"
+                        readOnly={selectedEvent.end.isBefore(dayjs())}
+                        closedNotice="This event has ended — chat is read-only."
+                      />
+                    ) : (
+                      <p className="text-sm text-[var(--color-ink-faint)]">
+                        This event doesn&rsquo;t have a chat set up. (Its creation may have partially
+                        failed — see the error banner if one appeared when it was created.)
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {!selectedEvent.data.editable && (
                   <p className="mt-3 text-xs text-[var(--color-ink-faint)]">
