@@ -1,5 +1,6 @@
 "use client";
 
+import { QRCodeCanvas } from "qrcode.react";
 import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { createInviteWithGeneratedCode } from "@/lib/inviteCodes";
@@ -28,6 +29,7 @@ export default function InvitesPanel({ cohort, userId }: { cohort: Cohort; userI
     creatorActive: boolean;
     creatorName: string | null;
   }>({ open: false, creatorActive: true, creatorName: null });
+  const [openQrForId, setOpenQrForId] = useState<string | null>(null);
 
   const loadInvites = useCallback(async () => {
     const supabase = createClient();
@@ -177,6 +179,7 @@ export default function InvitesPanel({ cohort, userId }: { cohort: Cohort; userI
               : false;
             const isMaxedOut = invite.max_uses !== null && invite.use_count >= invite.max_uses;
             const isDead = invite.revoked || isExpired || isMaxedOut;
+            const joinUrl = buildJoinUrl(invite.code);
 
             return (
               <div key={invite.id} className="flex items-center justify-between gap-3 px-3 py-3">
@@ -195,12 +198,25 @@ export default function InvitesPanel({ cohort, userId }: { cohort: Cohort; userI
                     {invite.expires_at &&
                       ` · expires ${new Date(invite.expires_at).toLocaleDateString()}`}
                   </p>
+
+                  {!isDead && openQrForId === invite.id && (
+                    <div className="mt-3">
+                      <QRCodeCanvas value={joinUrl} size={112} />
+                    </div>
+                  )}
+
                 </div>
                 <div className="flex shrink-0 gap-2">
                   {!isDead && (
-                    <Button variant="secondary" onClick={() => handleCopy(invite)}>
-                      {copiedId === invite.id ? "Copied" : "Copy link"}
-                    </Button>
+                    <>
+                      <Button variant="secondary" onClick={() => handleCopy(invite)}>
+                        {copiedId === invite.id ? "Copied" : "Copy link"}
+                      </Button>
+
+                      <Button variant="ghost" onClick={() => setOpenQrForId(openQrForId === invite.id ? null : invite.id)}>
+                        {openQrForId === invite.id ? "Hide QR" : "Show QR"}
+                      </Button>
+                    </>
                   )}
                   {!invite.revoked && (
                     <Button variant="ghost" onClick={() => handleRevokeClick(invite)}>
