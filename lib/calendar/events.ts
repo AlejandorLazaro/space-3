@@ -14,6 +14,8 @@ export interface EventRow {
   starts_at: string | null;
   ends_at: string | null;
   color: string | null;
+  /** Hours after ends_at before this event's chat closes to new messages. 0 = closes exactly at event end. See 019_events_chat_grace_period.sql. */
+  chat_closes_after_hours: number;
   created_at: string;
 }
 
@@ -73,9 +75,12 @@ export async function fetchCalendarEvents(cohortId?: string): Promise<EventWithC
 
 /**
  * Persists a drag/resize reschedule or a full edit-modal save. Requires
- * 012_events_update_policy.sql — without it, this resolves with no error
- * but zero rows change (RLS silent denial), because 008 never defined an
- * UPDATE policy on `events`.
+ * 012_events_update_policy.sql — without it, Supabase returns {error: null}
+ * even though RLS silently blocked every row (no exception is thrown for an
+ * UPDATE that matches zero rows). `.select("id")` forces the response to
+ * report which rows were actually touched, so that silent-failure case can
+ * be turned into a real, catchable error instead of a false "success" that
+ * only reveals itself on the next page refresh.
  */
 export async function updateEvent(
   eventId: string,
@@ -86,22 +91,34 @@ export async function updateEvent(
     starts_at: string;
     ends_at: string;
     color: string | null;
+    chat_closes_after_hours: number;
   }>
 ): Promise<void> {
   const supabase = createClient();
-  const { error } = await supabase.from("events").update(fields).eq("id", eventId);
+  const { data, error } = await supabase.from("events").update(fields).eq("id", eventId).select("id");
   if (error) throw error;
+  if (!data || data.length === 0) {
+    throw new Error(
+      "Update affected 0 rows. Most likely RLS silently blocked it (you may not be recognized as this event's creator) rather than a real database error."
+    );
+  }
 }
 
 /**
- * Requires 015_events_delete_policy.sql — without it, this resolves with no
- * error but zero rows deleted (RLS silent denial), same failure shape as the
- * missing UPDATE policy.
+ * Requires 015_events_delete_policy.sql — without it, Supabase returns
+ * {error: null} even though RLS silently blocked the delete. Same fix as
+ * updateEvent(): select back the affected rows to turn a silent no-op into
+ * a real, catchable error.
  */
 export async function deleteEvent(eventId: string): Promise<void> {
   const supabase = createClient();
-  const { error } = await supabase.from("events").delete().eq("id", eventId);
+  const { data, error } = await supabase.from("events").delete().eq("id", eventId).select("id");
   if (error) throw error;
+  if (!data || data.length === 0) {
+    throw new Error(
+      "Delete affected 0 rows. Most likely RLS silently blocked it rather than a real database error."
+    );
+  }
 }
 
 export interface NewEventInput {

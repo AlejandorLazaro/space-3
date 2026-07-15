@@ -18,7 +18,8 @@ import {
   type RsvpStatus,
 } from "@/lib/calendar/events";
 import { fetchEventRsvps, upsertRsvp, type RsvpWithProfile } from "@/lib/calendar/rsvps";
-import { createEventChat } from "@/lib/calendar/chats";
+import { createEventChat, describeEventChatLifecycle } from "@/lib/calendar/chats";
+import { showErrorToast, ToastHost } from "@/components/Toast";
 import ChatPanel from "@/components/ChatPanel";
 import {
   fetchRecurringAvailability,
@@ -56,6 +57,8 @@ interface PocEventData {
   location?: string | null;
   /** This event's dedicated coordination chat (016_chat_levels.sql) — null if creation's second insert (createEventChat) failed. */
   chatId?: string | null;
+  /** Hours after this event ends before its chat closes — 019_events_chat_grace_period.sql. */
+  chatClosesAfterHours?: number;
   [key: string]: unknown; // required for structural compatibility with CalendarEvent['data']
 }
 
@@ -101,6 +104,7 @@ function groupRowToCalendarEvent(
       editable: currentUserId != null && row.created_by === currentUserId,
       cohortId: row.cohort_id,
       chatId: extractChatId(row.chats),
+      chatClosesAfterHours: row.chat_closes_after_hours,
       cohortName,
       rawTitle: row.title,
       description: row.description,
@@ -156,6 +160,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
   const [editStart, setEditStart] = useState("");
   const [editEnd, setEditEnd] = useState("");
   const [editColor, setEditColor] = useState(GROUP_COLOR);
+  const [editChatGraceHours, setEditChatGraceHours] = useState(0);
 
   // RSVP state — scoped to whichever event is currently selected
   const [rsvps, setRsvps] = useState<RsvpWithProfile[]>([]);
@@ -295,9 +300,12 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
       });
     } catch (err) {
       console.error("Failed to persist event move:", err);
-      setError(
-        "Couldn't save that change — reload to see the real state. (Check that 012_events_update_policy.sql has been applied.)"
-      );
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Couldn't save that change — reload to see the real state. (Check that 012_events_update_policy.sql has been applied.)";
+      setError(message);
+      showErrorToast(message);
     }
   }, []);
 
@@ -354,7 +362,9 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
         }
       } catch (err) {
         console.error("Failed to create event:", err);
-        setError("Couldn't save the new event. Try again.");
+        const message = err instanceof Error ? err.message : "Couldn't save the new event. Try again.";
+        setError(message);
+        showErrorToast(message);
       }
     },
     [cohortId, currentUserId]
@@ -447,7 +457,9 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
         setRsvps(fresh);
       } catch (err) {
         console.error("Failed to save RSVP:", err);
-        setError("Couldn't save your RSVP. Try again.");
+        const message = err instanceof Error ? err.message : "Couldn't save your RSVP. Try again.";
+        setError(message);
+        showErrorToast(message);
       } finally {
         setSavingRsvp(false);
       }
@@ -463,6 +475,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
     setEditStart(selectedEvent.start.format("YYYY-MM-DDTHH:mm"));
     setEditEnd(selectedEvent.end.format("YYYY-MM-DDTHH:mm"));
     setEditColor(selectedEvent.color);
+    setEditChatGraceHours((selectedEvent.data.chatClosesAfterHours as number) ?? 0);
     setEditing(true);
   }
 
@@ -480,6 +493,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
         starts_at: newStart.toISOString(),
         ends_at: newEnd.toISOString(),
         color: editColor,
+        chat_closes_after_hours: editChatGraceHours,
       });
       const cohortNameForRow = selectedEvent.data.cohortName as string | undefined;
       setGroupEvents((prev) =>
@@ -497,6 +511,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                   rawTitle: editTitle,
                   description: editDescription || null,
                   location: editLocation || null,
+                  chatClosesAfterHours: editChatGraceHours,
                 },
               }
             : e
@@ -506,11 +521,22 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
       setEditing(false);
     } catch (err) {
       console.error("Failed to save event:", err);
-      setError("Couldn't save changes. Try again.");
+      const message = err instanceof Error ? err.message : "Couldn't save changes. Try again.";
+      setError(message);
+      showErrorToast(message);
     } finally {
       setSavingEdit(false);
     }
-  }, [selectedEvent, editTitle, editDescription, editLocation, editStart, editEnd, editColor]);
+  }, [
+    selectedEvent,
+    editTitle,
+    editDescription,
+    editLocation,
+    editStart,
+    editEnd,
+    editColor,
+    editChatGraceHours,
+  ]);
 
   const handleConfirmDelete = useCallback(async () => {
     if (!selectedEvent) return;
@@ -522,7 +548,12 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
       setSelectedEvent(null);
     } catch (err) {
       console.error("Failed to delete event:", err);
-      setError("Couldn't delete that event. Try again. (Check that 015_events_delete_policy.sql has been applied.)");
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Couldn't delete that event. Try again. (Check that 015_events_delete_policy.sql has been applied.)";
+      setError(message);
+      showErrorToast(message);
     } finally {
       setDeleting(false);
     }
@@ -732,8 +763,14 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                         currentUserId={currentUserId ?? ""}
                         chatId={selectedEvent.data.chatId as string}
                         title="Event chat"
-                        readOnly={selectedEvent.end.isBefore(dayjs())}
+                        readOnly={selectedEvent.end
+                          .add((selectedEvent.data.chatClosesAfterHours as number) ?? 0, "hour")
+                          .isBefore(dayjs())}
                         closedNotice="This event has ended — chat is read-only."
+                        infoBanner={describeEventChatLifecycle(
+                          selectedEvent.end.toISOString(),
+                          (selectedEvent.data.chatClosesAfterHours as number) ?? 0
+                        )}
                       />
                     ) : (
                       <p className="text-sm text-[var(--color-ink-faint)]">
@@ -820,6 +857,20 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                       ))}
                     </div>
                   </div>
+                  <div>
+                    <Label>Chat stays open</Label>
+                    <select
+                      value={editChatGraceHours}
+                      onChange={(e) => setEditChatGraceHours(Number(e.target.value))}
+                      className="rounded-md border border-[var(--color-line)] bg-[var(--color-paper)] px-3 py-2 text-sm text-[var(--color-ink)]"
+                    >
+                      <option value={0}>Until the event ends</option>
+                      <option value={1}>1 hour after</option>
+                      <option value={24}>1 day after</option>
+                      <option value={72}>3 days after</option>
+                      <option value={168}>1 week after</option>
+                    </select>
+                  </div>
                 </div>
                 <div className="mt-4 flex justify-end gap-2">
                   <Button variant="secondary" onClick={() => setEditing(false)} disabled={savingEdit}>
@@ -844,6 +895,8 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
         onCancel={() => setDeleteConfirmOpen(false)}
         onConfirm={handleConfirmDelete}
       />
+
+      <ToastHost />
     </Card>
   );
 }

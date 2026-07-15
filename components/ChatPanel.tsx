@@ -1,10 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import dayjs from "dayjs";
+import relativeTime from "dayjs/plugin/relativeTime";
 import { createClient } from "@/lib/supabase/client";
 import { Button, Textarea, Card } from "@/components/ui";
 import type { Message } from "@/lib/types";
 import { fetchCohortGroupChatId } from "@/lib/calendar/chats";
+
+dayjs.extend(relativeTime);
 
 interface ChatPanelProps {
   currentUserId: string;
@@ -26,6 +30,8 @@ interface ChatPanelProps {
   closedNotice?: string;
   /** Header label — defaults to "Group chat" for the cohort-wide case. */
   title?: string;
+  /** Small persistent banner explaining this chat's ephemerality — when it closes to new messages and/or when its data is actually deleted. */
+  infoBanner?: string;
 }
 
 export default function ChatPanel({
@@ -35,6 +41,7 @@ export default function ChatPanel({
   readOnly = false,
   closedNotice,
   title = "Group chat",
+  infoBanner,
 }: ChatPanelProps) {
   const supabase = createClient();
   const [resolvedChatId, setResolvedChatId] = useState<string | null>(chatIdProp ?? null);
@@ -171,6 +178,12 @@ export default function ChatPanel({
         </span>
       </div>
 
+      {infoBanner && (
+        <div className="border-b border-[var(--color-line)] bg-[var(--color-fog)] px-4 py-1.5 text-xs text-[var(--color-ink-soft)]">
+          {infoBanner}
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {error ? (
           <p className="text-sm text-[var(--color-danger)]">{error}</p>
@@ -202,6 +215,12 @@ export default function ChatPanel({
                       </div>
                     )}
                     <div>{m.content}</div>
+                  </div>
+                  <div
+                    className="mt-0.5 text-[10px] text-[var(--color-ink-faint)]"
+                    title={dayjs(m.created_at).format("MMM D, YYYY h:mm A")}
+                  >
+                    {dayjs(m.created_at).fromNow()}
                   </div>
                 </div>
               );

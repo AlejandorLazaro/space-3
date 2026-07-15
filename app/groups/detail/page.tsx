@@ -9,7 +9,7 @@ import TopBar from "@/components/TopBar";
 import { Card, Tag, Button } from "@/components/ui";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import ApplyButton from "@/components/ApplyButton";
-import ChatPanel from "@/components/ChatPanel";
+import CohortChatTabs from "@/components/groups/CohortChatTabs";
 import RequireAuth from "@/components/RequireAuth";
 import UpcomingEventsWidget from "@/components/groups/UpcomingEventsWidget";
 
@@ -231,7 +231,7 @@ function CohortDetailPageInner() {
             </Card>
             ) : (
             <div className="grid gap-6 sm:grid-cols-[1fr_240px]">
-                <ChatPanel cohortId={cohort.id} currentUserId={userId} />
+                <CohortChatTabs cohortId={cohort.id} currentUserId={userId} />
 
                 <div className="flex flex-col gap-6">
                 {/* Applications, Invites, and Settings all live at
