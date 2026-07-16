@@ -286,15 +286,23 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
 
     const newStart = dayjs(updated.start);
     const newEnd = dayjs(updated.end);
+    const eventId = String(updated.id);
 
+    // Captured via the functional updater (not a separate groupEvents read)
+    // so this callback can stay dependency-free — same reason every other
+    // state read in this component goes through `prev =>` rather than
+    // closing over `groupEvents` directly.
+    let previous: { start: dayjs.Dayjs; end: dayjs.Dayjs } | null = null;
     setGroupEvents((prev) =>
-      prev.map((e) =>
-        String(e.id) === String(updated.id) ? { ...e, start: newStart, end: newEnd } : e
-      )
+      prev.map((e) => {
+        if (String(e.id) !== eventId) return e;
+        previous = { start: e.start, end: e.end };
+        return { ...e, start: newStart, end: newEnd };
+      })
     );
 
     try {
-      await updateEvent(String(updated.id), {
+      await updateEvent(eventId, {
         starts_at: newStart.toISOString(),
         ends_at: newEnd.toISOString(),
       });
@@ -303,9 +311,18 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
       const message =
         err instanceof Error
           ? err.message
-          : "Couldn't save that change — reload to see the real state. (Check that 012_events_update_policy.sql has been applied.)";
+          : "Couldn't save that change."; //  (Check that 012_events_update_policy.sql has been applied.)
       setError(message);
       showErrorToast(message);
+
+      // Snap back to the last DB-confirmed position instead of leaving the
+      // failed optimistic move on screen until a reload fixes it.
+      if (previous) {
+        const { start, end } = previous;
+        setGroupEvents((prev) =>
+          prev.map((e) => (String(e.id) === eventId ? { ...e, start, end } : e))
+        );
+      }
     }
   }, []);
 
@@ -551,7 +568,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
       const message =
         err instanceof Error
           ? err.message
-          : "Couldn't delete that event. Try again. (Check that 015_events_delete_policy.sql has been applied.)";
+          : "Couldn't delete that event. Try again."; // (Check that 015_events_delete_policy.sql has been applied.)
       setError(message);
       showErrorToast(message);
     } finally {

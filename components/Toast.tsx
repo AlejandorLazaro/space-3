@@ -9,6 +9,8 @@ interface ToastItem {
   id: number;
   message: string;
   type: ToastType;
+  /** Set right before actual removal, so the exit transition has something to animate toward before the item leaves the array entirely. */
+  leaving?: boolean;
 }
 
 type Listener = (toasts: ToastItem[]) => void;
@@ -17,13 +19,33 @@ let toasts: ToastItem[] = [];
 let nextId = 1;
 const listeners = new Set<Listener>();
 
+// How long the fade transition takes. Kept as a plain number for the
+// setTimeout delay below; the Tailwind class in ToastItemView (duration-200)
+// is a separate, hardcoded literal that must be kept in sync with this by
+// hand — Tailwind's compiler only generates CSS for class names it can see
+// as literal strings in source, so `duration-${FADE_MS}` would silently
+// produce no CSS at all rather than the intended transition-duration.
+const FADE_MS = 200;
+
 function emit() {
   for (const l of listeners) l([...toasts]);
 }
 
-function dismiss(id: number) {
+function removeToast(id: number) {
   toasts = toasts.filter((t) => t.id !== id);
   emit();
+}
+
+/**
+ * Two-phase dismiss: mark as leaving (triggers the fade-out transition in
+ * the rendered item), then actually remove it from state once the
+ * transition has had time to play. A toast that's just yanked out of the
+ * array immediately has nothing to animate — the fade would never be seen.
+ */
+function requestDismiss(id: number) {
+  toasts = toasts.map((t) => (t.id === id ? { ...t, leaving: true } : t));
+  emit();
+  setTimeout(() => removeToast(id), FADE_MS);
 }
 
 /**
@@ -37,7 +59,7 @@ export function showToast(message: string, type: ToastType = "info", durationMs 
   const id = nextId++;
   toasts = [...toasts, { id, message, type }];
   emit();
-  if (durationMs > 0) setTimeout(() => dismiss(id), durationMs);
+  if (durationMs > 0) setTimeout(() => requestDismiss(id), durationMs);
   return id;
 }
 
@@ -47,6 +69,50 @@ export function showErrorToast(message: string, durationMs = 7000): number {
 
 export function showSuccessToast(message: string, durationMs = 4000): number {
   return showToast(message, "success", durationMs);
+}
+
+function toneClasses(type: ToastType) {
+  // "More opaque, still a bit of transparency" — /90 background rather than
+  // fully solid or the earlier very-light /10 tint.
+  if (type === "error") return "border-[var(--color-danger)]/40 bg-[var(--color-danger)]/90 text-white";
+  if (type === "success") return "border-[var(--color-teal)]/40 bg-[var(--color-teal)]/90 text-white";
+  return "border-[var(--color-line)] bg-[var(--color-paper)]/90 text-[var(--color-ink)]";
+}
+
+function ToastItemView({ toast, onDismiss }: { toast: ToastItem; onDismiss: (id: number) => void }) {
+  // Starts hidden, flips to visible one frame after mount — gives the
+  // browser a paint with opacity-0 first, so the transition to opacity-100
+  // actually has something to animate from instead of just appearing.
+  const [entered, setEntered] = useState(false);
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  const visible = entered && !toast.leaving;
+
+  return (
+    <div
+      role="alert"
+      className={
+        "pointer-events-auto inline-flex w-fit max-w-[90vw] items-start gap-2 rounded-md border px-4 py-3 text-sm shadow-lg transition-all duration-200 ease-out " +
+        (visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2") +
+        " " +
+        toneClasses(toast.type)
+      }
+    >
+      <span className="whitespace-pre-wrap break-words">{toast.message}</span>
+      <button
+        type="button"
+        onClick={() => onDismiss(toast.id)}
+        aria-label="Dismiss"
+        className="shrink-0 opacity-70 hover:opacity-100"
+      >
+        ×
+      </button>
+    </div>
+  );
 }
 
 /**
@@ -69,30 +135,9 @@ export function ToastHost() {
   if (typeof document === "undefined" || items.length === 0) return null;
 
   return createPortal(
-    <div className="fixed right-4 top-4 z-[100] flex w-80 flex-col gap-2">
+    <div className="pointer-events-none fixed bottom-4 left-1/2 z-[100] flex -translate-x-1/2 flex-col items-center gap-2">
       {items.map((t) => (
-        <div
-          key={t.id}
-          role="alert"
-          className={
-            "flex items-start gap-2 rounded-md border px-4 py-3 text-sm shadow-lg " +
-            (t.type === "error"
-              ? "border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10 text-[var(--color-danger)]"
-              : t.type === "success"
-                ? "border-[var(--color-teal)]/30 bg-[var(--color-teal-soft)] text-[var(--color-teal)]"
-                : "border-[var(--color-line)] bg-[var(--color-paper)] text-[var(--color-ink)]")
-          }
-        >
-          <span className="flex-1">{t.message}</span>
-          <button
-            type="button"
-            onClick={() => dismiss(t.id)}
-            aria-label="Dismiss"
-            className="shrink-0 opacity-60 hover:opacity-100"
-          >
-            ×
-          </button>
-        </div>
+        <ToastItemView key={t.id} toast={t} onDismiss={requestDismiss} />
       ))}
     </div>,
     document.body
