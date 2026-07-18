@@ -1,12 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 import dayjs from "dayjs";
-import { IlamyCalendar } from "@ilamy/calendar";
-import type { CalendarEvent } from "@ilamy/calendar";
+import {
+  IlamyCalendar,
+  CalendarEvent,
+  RenderCurrentTimeIndicatorProps,
+  useIlamyCalendarContext,
+  type IlamyCalendarApi,
+} from "@ilamy/calendar";
 import { agendaPlugin } from "@ilamy/calendar/plugins/agenda";
 import { Card, Button, Input, Textarea, Label } from "@/components/ui";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import CustomCalendarHeader from "@/components/calendar/CustomCalendarHeader";
 import { createClient } from "@/lib/supabase/client";
 import {
   fetchCalendarEvents,
@@ -40,6 +53,11 @@ import {
 // doesn't exist), so this component owns the entire view/edit/delete flow
 // itself via a custom modal rather than ilamy's internal form.
 //
+// Creation (New button + edit) also goes through this same custom modal now
+// — see openCreateModal/handleCreateNew — rather than ilamy's own built-in
+// event-creation form, whose color picker doesn't match our 6-preset system
+// and was producing events with unusable color values (see UI pass notes).
+//
 // Requires 012 (UPDATE policy), 014 (color column), 015 (DELETE policy).
 // ---------------------------------------------------------------------------
 
@@ -72,9 +90,27 @@ interface PocCalendarEvent {
   data: PocEventData;
 }
 
-const PERSONAL_COLOR = "#2563eb"; // matches space3-design-doc.md: personal = blue
+const PERSONAL_COLOR = "#94a3b8"; // standardized, non-customizable — fallback for surfaces (e.g. agenda plugin) that may not honor renderEvent's dashed treatment
 const GROUP_COLOR = "#16a34a"; // group = green (fallback when no color was ever set)
 const COLOR_PRESETS = ["#16a34a", "#2563eb", "#dc2626", "#d97706", "#7c3aed", "#0891b2"];
+
+function isHexColor(value: string | null | undefined): value is string {
+  return !!value && /^#([0-9a-f]{6})$/i.test(value.trim());
+}
+
+/** Checked live at the moment of each edit attempt, not cached — so a form left open across the event's end time still gets caught on save, not just on open. */
+function hasEnded(end: dayjs.Dayjs): boolean {
+  return end.isBefore(dayjs());
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const clean = hex.replace("#", "");
+  const bigint = parseInt(clean, 16);
+  const r = (bigint >> 16) & 255;
+  const g = (bigint >> 8) & 255;
+  const b = bigint & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 function getEventData(event: CalendarEvent): PocEventData {
   return (event.data as PocEventData | undefined) ?? { layer: "group", editable: false };
@@ -86,19 +122,22 @@ function groupRowToCalendarEvent(
 ): PocCalendarEvent | null {
   if (!row.starts_at) return null; // TBD events excluded — no sane grid position, mirrors calendar-feed Edge Function
   const end = row.ends_at ?? row.starts_at;
-  const resolvedColor = row.color ?? GROUP_COLOR;
+  // Sanitized here, at the single read path, so any event created via
+  // ilamy's own built-in form (or bad test data) with a non-hex color value
+  // (e.g. a Tailwind-token-shaped string) falls back cleanly instead of
+  // rendering invisible — see UI pass notes on the "invisible new event" bug.
+  const resolvedColor = isHexColor(row.color) ? row.color : GROUP_COLOR;
   const cohortName = row.cohorts?.name;
   return {
     id: row.id,
     title: cohortName ? `${row.title} — ${cohortName}` : row.title,
     start: dayjs(row.starts_at),
     end: dayjs(end),
-    // Setting both — CalendarEvent has separate `color`/`backgroundColor`
-    // fields and it's not verifiable from static analysis alone which one
-    // ilamy's chip rendering actually prioritizes for fill vs. text/accent.
-    // Setting both to the same persisted value sidesteps the ambiguity.
+    // Two-tone: `color` is the solid accent (border + text), `backgroundColor`
+    // is a light tint derived from it — matches ilamy's own default event
+    // styling convention more closely than a single flat fill.
     color: resolvedColor,
-    backgroundColor: resolvedColor,
+    backgroundColor: hexToRgba(resolvedColor, 0.14),
     data: {
       layer: "group",
       editable: currentUserId != null && row.created_by === currentUserId,
@@ -111,6 +150,93 @@ function groupRowToCalendarEvent(
       location: row.location,
     },
   };
+}
+
+function renderCalendarEvent(event: CalendarEvent) {
+  const data = getEventData(event);
+  if (data.layer === "personal") {
+    return (
+      <div
+        style={{
+          border: "1.5px dashed #94a3b8",
+          background: "transparent",
+          borderRadius: 4,
+          padding: "2px 6px",
+          fontSize: 12,
+          color: "#475569",
+          height: "100%",
+          boxSizing: "border-box",
+          overflow: "hidden",
+        }}
+      >
+        Available
+      </div>
+    );
+  }
+  return (
+    <div
+      style={{
+        background: event.backgroundColor ?? hexToRgba(GROUP_COLOR, 0.14),
+        borderLeft: `3px solid ${event.color ?? GROUP_COLOR}`,
+        color: event.color ?? GROUP_COLOR,
+        fontWeight: 600,
+        borderRadius: 4,
+        padding: "2px 6px",
+        fontSize: 12,
+        height: "100%",
+        boxSizing: "border-box",
+        overflow: "hidden",
+        whiteSpace: "nowrap",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {event.title}
+    </div>
+  );
+}
+
+function renderCurrentTimeIndicator({
+  currentTime,
+  progress,
+  axis,
+  view,
+}: RenderCurrentTimeIndicatorProps) {
+  if (view === "agenda") return null;
+
+  if (axis === "horizontal") {
+    return (
+      <div style={{ left: `${progress}%` }} className="absolute top-0 bottom-0 pointer-events-none">
+        <div className="w-0.5 h-full bg-red-500" />
+      </div>
+    );
+  }
+  return (
+    <div style={{ top: `${progress}%` }} className="absolute left-0 right-0 pointer-events-none">
+      <div className="h-0.5 bg-red-500" />
+      <span className="absolute left-0 -translate-y-1/2 bg-red-500 text-white text-[10px] px-1 rounded-r-sm">
+        {currentTime.format("h:mm A")}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Renders inside IlamyCalendar's own tree (via headerComponent, alongside
+ * CustomCalendarHeader) purely to reach useIlamyCalendarContext() — that
+ * hook throws outside the provider, and CohortCalendarPoc itself is an
+ * ancestor of <IlamyCalendar>, not a descendant, so it can't call the hook
+ * directly. Exposes the live API to the parent via a ref rather than a
+ * callback, since the parent needs to call into it imperatively (forcing a
+ * drag revert) from inside a separate event handler, not react to it.
+ *
+ * Unconfirmed assumption this whole bridge depends on: that headerComponent
+ * is actually mounted inside the context provider tree. First thing to
+ * check if this throws a "must be used within a provider" error.
+ */
+function CalendarApiBridge({ apiRef }: { apiRef: MutableRefObject<IlamyCalendarApi | null> }) {
+  const api = useIlamyCalendarContext();
+  apiRef.current = api;
+  return null;
 }
 
 interface CohortCalendarPocProps {
@@ -132,6 +258,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
 
   const [groupEvents, setGroupEvents] = useState<PocCalendarEvent[]>([]);
   const autoOpenedRef = useRef(false);
+  const ilamyApiRef = useRef<IlamyCalendarApi | null>(null);
   const [recurring, setRecurring] = useState<RecurringAvailabilityRow[]>([]);
   const [overrides, setOverrides] = useState<AvailabilityOverrideRow[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -147,7 +274,8 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Read/Update/Delete modal state
+  // Create/Read/Update/Delete modal state
+  const [creatingNew, setCreatingNew] = useState(false);
   const [selectedEvent, setSelectedEvent] = useState<PocCalendarEvent | null>(null);
   const [editing, setEditing] = useState(false);
   const [modalTab, setModalTab] = useState<"details" | "chat">("details");
@@ -257,7 +385,14 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
     const blocks = resolveAvailableBlocks(recurring, overrides, visibleRange.start, visibleRange.end);
     return blocks.map((b, i) => ({
       id: `avail-${b.start.valueOf()}-${i}`,
-      title: "Available",
+      // The time range lives in the title itself (not just renderCalendarEvent's
+      // JSX) because Agenda may render its own list items straight from
+      // event.title rather than going through our custom renderEvent — see
+      // the PERSONAL_COLOR fallback comment for the same uncertainty. This
+      // way the info shows up regardless of which path Agenda actually uses.
+      // Day/Week grid chips ignore this and just show "Available" (see
+      // renderCalendarEvent) since the grid position already conveys time.
+      title: `Available: ${b.start.format("h:mm A")} – ${b.end.format("h:mm A")}`,
       start: b.start,
       end: b.end,
       color: PERSONAL_COLOR,
@@ -277,54 +412,148 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
     setVisibleLayers((prev) => ({ ...prev, [layer]: !prev[layer] }));
   }
 
-  const handleEventUpdate = useCallback(async (updated: CalendarEvent) => {
-    const { editable } = getEventData(updated);
-    if (!editable) {
-      console.warn("Blocked move: event is view-only.", updated.id);
-      return; // don't touch state — calendar re-renders from unchanged `groupEvents`, move visually reverts
-    }
+  function closeModal() {
+    setSelectedEvent(null);
+    setEditing(false);
+    setCreatingNew(false);
+  }
 
-    const newStart = dayjs(updated.start);
-    const newEnd = dayjs(updated.end);
-    const eventId = String(updated.id);
+  function openCreateModal() {
+    if (!cohortId) return;
+    const start = dayjs().add(1, "hour").startOf("hour");
+    setEditTitle("");
+    setEditDescription("");
+    setEditLocation("");
+    setEditStart(start.format("YYYY-MM-DDTHH:mm"));
+    setEditEnd(start.add(1, "hour").format("YYYY-MM-DDTHH:mm"));
+    setEditColor(COLOR_PRESETS[0]);
+    setEditChatGraceHours(0);
+    setSelectedEvent(null);
+    setEditing(true);
+    setCreatingNew(true);
+  }
 
-    // Captured via the functional updater (not a separate groupEvents read)
-    // so this callback can stay dependency-free — same reason every other
-    // state read in this component goes through `prev =>` rather than
-    // closing over `groupEvents` directly.
-    let previous: { start: dayjs.Dayjs; end: dayjs.Dayjs } | null = null;
-    setGroupEvents((prev) =>
-      prev.map((e) => {
-        if (String(e.id) !== eventId) return e;
-        previous = { start: e.start, end: e.end };
-        return { ...e, start: newStart, end: newEnd };
-      })
-    );
-
+  const handleCreateNew = useCallback(async () => {
+    if (!cohortId || !currentUserId) return;
+    setSavingEdit(true);
+    setError(null);
     try {
-      await updateEvent(eventId, {
+      const newStart = dayjs(editStart);
+      const newEnd = dayjs(editEnd);
+      const inserted = await insertEvent({
+        cohort_id: cohortId,
+        created_by: currentUserId,
+        title: editTitle || "Untitled event",
+        description: editDescription || null,
+        location: editLocation || null,
         starts_at: newStart.toISOString(),
         ends_at: newEnd.toISOString(),
+        color: editColor,
       });
+
+      let chatId: string | null = null;
+      try {
+        chatId = await createEventChat({
+          cohort_id: cohortId,
+          event_id: inserted.id,
+          title: inserted.title,
+          created_by: currentUserId,
+        });
+      } catch (chatErr) {
+        console.error("Event created, but its chat could not be created:", chatErr);
+        setError("Event created, but its chat couldn't be set up.");
+      }
+
+      const mapped = groupRowToCalendarEvent(inserted, currentUserId);
+      if (mapped) {
+        setGroupEvents((prev) => [...prev, { ...mapped, data: { ...mapped.data, chatId } }]);
+      }
+      closeModal();
     } catch (err) {
-      console.error("Failed to persist event move:", err);
-      const message =
-        err instanceof Error
-          ? err.message
-          : "Couldn't save that change."; //  (Check that 012_events_update_policy.sql has been applied.)
+      console.error("Failed to create event:", err);
+      const message = err instanceof Error ? err.message : "Couldn't create the event. Try again.";
       setError(message);
       showErrorToast(message);
-
-      // Snap back to the last DB-confirmed position instead of leaving the
-      // failed optimistic move on screen until a reload fixes it.
-      if (previous) {
-        const { start, end } = previous;
-        setGroupEvents((prev) =>
-          prev.map((e) => (String(e.id) === eventId ? { ...e, start, end } : e))
-        );
-      }
+    } finally {
+      setSavingEdit(false);
     }
-  }, []);
+  }, [cohortId, currentUserId, editTitle, editDescription, editLocation, editStart, editEnd, editColor]);
+
+  const handleEventUpdate = useCallback(
+    async (updated: CalendarEvent) => {
+      const data = getEventData(updated);
+      const eventId = String(updated.id);
+      const original = [...groupEvents, ...personalEvents].find((e) => String(e.id) === eventId);
+      // Only group events have a real "completed" concept — personal
+      // availability blocks aren't calendar commitments with an end state.
+      const completed = data.layer === "group" && !!original && hasEnded(original.end);
+
+      if (!data.editable || completed) {
+        const updatedStart = dayjs(updated.start);
+        const updatedEnd = dayjs(updated.end);
+        // Calling ilamyApiRef.current.updateEvent() below appears to re-fire
+        // this same onEventUpdate callback as a notification of the
+        // correction — without this guard, that recurses forever (confirmed
+        // via a real "Maximum call stack size exceeded" crash). If the
+        // incoming position already matches `original`, this call *is* that
+        // notification — do nothing instead of correcting again.
+        const alreadyReverted =
+          !!original && updatedStart.isSame(original.start) && updatedEnd.isSame(original.end);
+
+        if (!alreadyReverted) {
+          console.warn(
+            completed ? "Blocked move: event has already ended." : "Blocked move: event is view-only.",
+            eventId
+          );
+          if (original) {
+            ilamyApiRef.current?.updateEvent(eventId, { start: original.start, end: original.end });
+          }
+          if (completed) {
+            showErrorToast("This event has already ended and can't be edited.");
+          }
+        }
+        return;
+      }
+
+      const newStart = dayjs(updated.start);
+      const newEnd = dayjs(updated.end);
+
+      let previous: { start: dayjs.Dayjs; end: dayjs.Dayjs } | null = null;
+      setGroupEvents((prev) =>
+        prev.map((e) => {
+          if (String(e.id) !== eventId) return e;
+          previous = { start: e.start, end: e.end };
+          return { ...e, start: newStart, end: newEnd };
+        })
+      );
+
+      try {
+        await updateEvent(eventId, {
+          starts_at: newStart.toISOString(),
+          ends_at: newEnd.toISOString(),
+        });
+      } catch (err) {
+        console.error("Failed to persist event move:", err);
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Couldn't save that change."; //  (Check that 012_events_update_policy.sql has been applied.)
+        setError(message);
+        showErrorToast(message);
+
+        // Snap back to the last DB-confirmed position instead of leaving the
+        // failed optimistic move on screen until a reload fixes it.
+        if (previous) {
+          const { start, end } = previous;
+          setGroupEvents((prev) =>
+            prev.map((e) => (String(e.id) === eventId ? { ...e, start, end } : e))
+          );
+          ilamyApiRef.current?.updateEvent(eventId, { start, end });
+        }
+      }
+    },
+    [groupEvents, personalEvents]
+  );
 
   const handleEventAdd = useCallback(
     async (added: CalendarEvent) => {
@@ -410,6 +639,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
       data,
     });
     setEditing(false);
+    setCreatingNew(false);
     setModalTab("details");
   }, []);
 
@@ -461,6 +691,10 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
   const handleSetRsvp = useCallback(
     async (status: RsvpStatus) => {
       if (!selectedEvent || !currentUserId) return;
+      if (hasEnded(selectedEvent.end)) {
+        showErrorToast("This event has already ended — RSVPs are closed.");
+        return;
+      }
       setSavingRsvp(true);
       setError(null);
       const eventId = selectedEvent.id;
@@ -486,6 +720,10 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
 
   function startEdit() {
     if (!selectedEvent) return;
+    if (hasEnded(selectedEvent.end)) {
+      showErrorToast("This event has already ended and can't be edited.");
+      return;
+    }
     setEditTitle((selectedEvent.data.rawTitle as string) ?? selectedEvent.title);
     setEditDescription((selectedEvent.data.description as string) ?? "");
     setEditLocation((selectedEvent.data.location as string) ?? "");
@@ -498,6 +736,11 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
 
   const handleSaveEdit = useCallback(async () => {
     if (!selectedEvent) return;
+    if (hasEnded(selectedEvent.end)) {
+      showErrorToast("This event has already ended and can't be edited.");
+      closeModal();
+      return;
+    }
     setSavingEdit(true);
     setError(null);
     try {
@@ -521,8 +764,11 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                 title: cohortNameForRow ? `${editTitle} — ${cohortNameForRow}` : editTitle,
                 start: newStart,
                 end: newEnd,
+                // Fixed: was previously `backgroundColor: editColor` (solid),
+                // which mismatched the two-tone rendering everywhere else
+                // until the next full reload recomputed it correctly.
                 color: editColor,
-                backgroundColor: editColor,
+                backgroundColor: hexToRgba(editColor, 0.14),
                 data: {
                   ...e.data,
                   rawTitle: editTitle,
@@ -534,8 +780,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
             : e
         )
       );
-      setSelectedEvent(null);
-      setEditing(false);
+      closeModal();
     } catch (err) {
       console.error("Failed to save event:", err);
       const message = err instanceof Error ? err.message : "Couldn't save changes. Try again.";
@@ -562,7 +807,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
       await deleteEvent(selectedEvent.id);
       setGroupEvents((prev) => prev.filter((e) => e.id !== selectedEvent.id));
       setDeleteConfirmOpen(false);
-      setSelectedEvent(null);
+      closeModal();
     } catch (err) {
       console.error("Failed to delete event:", err);
       const message =
@@ -635,17 +880,91 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
             onEventUpdate={handleEventUpdate}
             onDateChange={handleDateChange}
             isCellDisabled={isCellDisabled}
+            scrollTime="08:00:00"
+            renderEvent={renderCalendarEvent}
+            renderCurrentTimeIndicator={renderCurrentTimeIndicator}
+            headerComponent={
+              <>
+                <CustomCalendarHeader canCreateEvents={Boolean(cohortId)} onNewEvent={openCreateModal} />
+                <CalendarApiBridge apiRef={ilamyApiRef} />
+              </>
+            }
           />
         </div>
       )}
 
-      {selectedEvent && (
+      {(selectedEvent || creatingNew) && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-          onClick={() => setSelectedEvent(null)}
+          onClick={closeModal}
         >
           <Card className="w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
-            {selectedEvent.data.layer === "personal" ? (
+            {creatingNew ? (
+              <>
+                <h2 className="font-display text-lg">New event</h2>
+                <div className="mt-4 flex flex-col gap-3">
+                  <div>
+                    <Label>Title</Label>
+                    <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
+                  </div>
+                  <div>
+                    <Label>Description</Label>
+                    <Textarea
+                      value={editDescription}
+                      onChange={(e) => setEditDescription(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <Label>Location</Label>
+                    <Input value={editLocation} onChange={(e) => setEditLocation(e.target.value)} />
+                  </div>
+                  <div className="flex gap-2">
+                    <div className="flex-1">
+                      <Label>Start</Label>
+                      <Input
+                        type="datetime-local"
+                        value={editStart}
+                        onChange={(e) => setEditStart(e.target.value)}
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <Label>End</Label>
+                      <Input
+                        type="datetime-local"
+                        value={editEnd}
+                        onChange={(e) => setEditEnd(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <Label>Color</Label>
+                    <div className="flex gap-2">
+                      {COLOR_PRESETS.map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          onClick={() => setEditColor(c)}
+                          className="h-7 w-7 rounded-full border-2"
+                          style={{
+                            backgroundColor: hexToRgba(c, 0.35),
+                            borderColor: editColor === c ? "var(--color-ink)" : "transparent",
+                          }}
+                          aria-label={`Color ${c}`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-4 flex justify-end gap-2">
+                  <Button variant="secondary" onClick={closeModal} disabled={savingEdit}>
+                    Cancel
+                  </Button>
+                  <Button variant="primary" onClick={handleCreateNew} disabled={savingEdit}>
+                    {savingEdit ? "Saving…" : "Create"}
+                  </Button>
+                </div>
+              </>
+            ) : selectedEvent?.data.layer === "personal" ? (
               <>
                 <h2 className="font-display text-lg">Available</h2>
                 <p className="mt-2 text-sm text-[var(--color-ink-soft)]">
@@ -656,12 +975,12 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                   From your weekly pattern or an override. Manage this in Settings → Availability.
                 </p>
                 <div className="mt-4 flex justify-end">
-                  <Button variant="secondary" onClick={() => setSelectedEvent(null)}>
+                  <Button variant="secondary" onClick={closeModal}>
                     Close
                   </Button>
                 </div>
               </>
-            ) : !editing ? (
+            ) : selectedEvent && !editing ? (
               <>
                 <div className="flex items-center gap-2">
                   <span
@@ -675,6 +994,11 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                 {selectedEvent.data.cohortName && (
                   <p className="mt-1 text-xs text-[var(--color-ink-faint)]">
                     {selectedEvent.data.cohortName as string}
+                  </p>
+                )}
+                {hasEnded(selectedEvent.end) && (
+                  <p className="mt-1 text-xs text-[var(--color-ink-faint)]">
+                    This event has ended — RSVPs and edits are closed.
                   </p>
                 )}
 
@@ -804,7 +1128,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                   </p>
                 )}
                 <div className="mt-4 flex justify-end gap-2">
-                  <Button variant="secondary" onClick={() => setSelectedEvent(null)}>
+                  <Button variant="secondary" onClick={closeModal}>
                     Close
                   </Button>
                   {selectedEvent.data.editable && (
@@ -819,7 +1143,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                   )}
                 </div>
               </>
-            ) : (
+            ) : selectedEvent ? (
               <>
                 <h2 className="font-display text-lg">Edit event</h2>
                 <div className="mt-4 flex flex-col gap-3">
@@ -866,7 +1190,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                           onClick={() => setEditColor(c)}
                           className="h-7 w-7 rounded-full border-2"
                           style={{
-                            backgroundColor: c,
+                            backgroundColor: hexToRgba(c, 0.35),
                             borderColor: editColor === c ? "var(--color-ink)" : "transparent",
                           }}
                           aria-label={`Color ${c}`}
@@ -898,7 +1222,7 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                   </Button>
                 </div>
               </>
-            )}
+            ) : null}
           </Card>
         </div>
       )}
