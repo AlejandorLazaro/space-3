@@ -15,6 +15,7 @@ import {
   RenderCurrentTimeIndicatorProps,
   useIlamyCalendarContext,
   type IlamyCalendarApi,
+  type CellInfo,
 } from "@ilamy/calendar";
 import { agendaPlugin } from "@ilamy/calendar/plugins/agenda";
 import { Card, Button, Input, Textarea, Label } from "@/components/ui";
@@ -38,6 +39,10 @@ import {
   fetchRecurringAvailability,
   fetchAvailabilityOverrides,
   resolveAvailableBlocks,
+  insertAvailabilityOverride,
+  deleteAvailabilityOverride,
+  updateRecurringAvailability,
+  deleteRecurringAvailability,
   type RecurringAvailabilityRow,
   type AvailabilityOverrideRow,
 } from "@/lib/calendar/availability";
@@ -67,6 +72,8 @@ interface PocEventData {
   layer: CalLayer;
   /** false = either a computed availability block, or a group event you didn't create. */
   editable: boolean;
+  /** Personal blocks only — which underlying record produced this resolved interval. Every block on a given date is entirely one or the other, never mixed, since date-specific overrides fully replace the recurring baseline for that date (see resolveAvailableBlocks). Drives the edit-mode dimming and interaction gating. */
+  source?: "recurring" | "oneoff";
   cohortId?: string;
   cohortName?: string;
   /** Raw (un-suffixed) title — the displayed `title` may have " — Cohort Name" appended. */
@@ -90,8 +97,26 @@ interface PocCalendarEvent {
   data: PocEventData;
 }
 
+interface EditingAvailability {
+  date: string; // YYYY-MM-DD
+  start: string; // HH:mm, for the "add a window" action
+  end: string; // HH:mm
+  hasExistingOverrides: boolean;
+}
+
+interface EditingRecurring {
+  dayOfWeek: number;
+  rowId: string;
+  start: string; // HH:mm
+  end: string; // HH:mm
+}
+
+/** "view" = default, safe, no drag mutates anything. "recurring"/"oneoff" = which source type dragging and clicking will act on — the other type becomes visually dimmed and fully inert to click/drag while active. */
+type AvailabilityEditMode = "view" | "recurring" | "oneoff";
+
 const PERSONAL_COLOR = "#94a3b8"; // standardized, non-customizable — fallback for surfaces (e.g. agenda plugin) that may not honor renderEvent's dashed treatment
 const GROUP_COLOR = "#16a34a"; // group = green (fallback when no color was ever set)
+const DAY_LABELS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const COLOR_PRESETS = ["#16a34a", "#2563eb", "#dc2626", "#d97706", "#7c3aed", "#0891b2"];
 
 function isHexColor(value: string | null | undefined): value is string {
@@ -152,49 +177,6 @@ function groupRowToCalendarEvent(
   };
 }
 
-function renderCalendarEvent(event: CalendarEvent) {
-  const data = getEventData(event);
-  if (data.layer === "personal") {
-    return (
-      <div
-        style={{
-          border: "1.5px dashed #94a3b8",
-          background: "transparent",
-          borderRadius: 4,
-          padding: "2px 6px",
-          fontSize: 12,
-          color: "#475569",
-          height: "100%",
-          boxSizing: "border-box",
-          overflow: "hidden",
-        }}
-      >
-        Available
-      </div>
-    );
-  }
-  return (
-    <div
-      style={{
-        background: event.backgroundColor ?? hexToRgba(GROUP_COLOR, 0.14),
-        borderLeft: `3px solid ${event.color ?? GROUP_COLOR}`,
-        color: event.color ?? GROUP_COLOR,
-        fontWeight: 600,
-        borderRadius: 4,
-        padding: "2px 6px",
-        fontSize: 12,
-        height: "100%",
-        boxSizing: "border-box",
-        overflow: "hidden",
-        whiteSpace: "nowrap",
-        textOverflow: "ellipsis",
-      }}
-    >
-      {event.title}
-    </div>
-  );
-}
-
 function renderCurrentTimeIndicator({
   currentTime,
   progress,
@@ -248,13 +230,27 @@ interface CohortCalendarPocProps {
   cohortId?: string;
   /** When set, auto-opens that event's detail modal once its data has loaded — used for deep-links like the sidebar's Upcoming Events widget. */
   initialEventId?: string;
+  /** Initial Personal/Group layer visibility. Defaults to both on — used by AvailabilityPanel to default Group off, since that surface is about availability, not events. */
+  defaultVisibleLayers?: Record<CalLayer, boolean>;
+  /** Passed straight through to IlamyCalendar — lets an embedding page (e.g. AvailabilityPanel) carry over its own 12h/24h preference into the calendar's time gutter. */
+  timeFormat?: "12-hour" | "24-hour";
+  /** Suppresses the "Calendar" title + description + layer-toggle block — used when embedding inside a page (e.g. Settings) that already has its own heading, to avoid a duplicated title. */
+  hideHeader?: boolean;
 }
 
-export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCalendarPocProps) {
-  const [visibleLayers, setVisibleLayers] = useState<Record<CalLayer, boolean>>({
-    personal: true,
-    group: true,
-  });
+export default function CohortCalendarPoc({
+  cohortId,
+  initialEventId,
+  defaultVisibleLayers,
+  timeFormat,
+  hideHeader,
+}: CohortCalendarPocProps) {
+  const [visibleLayers, setVisibleLayers] = useState<Record<CalLayer, boolean>>(
+    defaultVisibleLayers ?? {
+      personal: true,
+      group: true,
+    }
+  );
 
   const [groupEvents, setGroupEvents] = useState<PocCalendarEvent[]>([]);
   const autoOpenedRef = useRef(false);
@@ -383,22 +379,32 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
 
   const personalEvents: PocCalendarEvent[] = useMemo(() => {
     const blocks = resolveAvailableBlocks(recurring, overrides, visibleRange.start, visibleRange.end);
-    return blocks.map((b, i) => ({
-      id: `avail-${b.start.valueOf()}-${i}`,
-      // The time range lives in the title itself (not just renderCalendarEvent's
-      // JSX) because Agenda may render its own list items straight from
-      // event.title rather than going through our custom renderEvent — see
-      // the PERSONAL_COLOR fallback comment for the same uncertainty. This
-      // way the info shows up regardless of which path Agenda actually uses.
-      // Day/Week grid chips ignore this and just show "Available" (see
-      // renderCalendarEvent) since the grid position already conveys time.
-      title: `Available: ${b.start.format("h:mm A")} – ${b.end.format("h:mm A")}`,
-      start: b.start,
-      end: b.end,
-      color: PERSONAL_COLOR,
-      backgroundColor: PERSONAL_COLOR,
-      data: { layer: "personal", editable: false },
-    }));
+    // Every block on a given date is entirely recurring-derived or entirely
+    // override-derived, never mixed — overrides fully replace the recurring
+    // baseline for their date (see resolveAvailableBlocks). So provenance
+    // can be tagged per-date from data already loaded here, with no changes
+    // needed to the resolve function itself.
+    const overrideDates = new Set(overrides.map((o) => o.override_date));
+    return blocks.map((b, i) => {
+      const dateKey = b.start.format("YYYY-MM-DD");
+      const source: "recurring" | "oneoff" = overrideDates.has(dateKey) ? "oneoff" : "recurring";
+      return {
+        id: `avail-${b.start.valueOf()}-${i}`,
+        // The time range lives in the title itself (not just renderCalendarEvent's
+        // JSX) because Agenda may render its own list items straight from
+        // event.title rather than going through our custom renderEvent — see
+        // the PERSONAL_COLOR fallback comment for the same uncertainty. This
+        // way the info shows up regardless of which path Agenda actually uses.
+        // Day/Week grid chips ignore this and just show "Available" (see
+        // renderCalendarEvent) since the grid position already conveys time.
+        title: `Available: ${b.start.format("h:mm A")} – ${b.end.format("h:mm A")}`,
+        start: b.start,
+        end: b.end,
+        color: PERSONAL_COLOR,
+        backgroundColor: PERSONAL_COLOR,
+        data: { layer: "personal", editable: true, source },
+      };
+    });
   }, [recurring, overrides, visibleRange]);
 
   const events = useMemo(() => {
@@ -412,20 +418,116 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
     setVisibleLayers((prev) => ({ ...prev, [layer]: !prev[layer] }));
   }
 
+  // Inline availability editing (My Calendar / aggregate view) — see the
+  // design note on why this is three unambiguous actions (add / mark day
+  // unavailable / reset) rather than a single "replace today's hours"
+  // action: overrides are purely additive-or-subtractive in
+  // resolveAvailableBlocks, with no "replace" semantic, and same-day
+  // overrides are order-dependent in a way this UI deliberately avoids
+  // triggering rather than tries to fix.
+  const [editingAvailability, setEditingAvailability] = useState<EditingAvailability | null>(null);
+  const [savingAvailability, setSavingAvailability] = useState(false);
+  const [availabilityEditMode, setAvailabilityEditMode] = useState<AvailabilityEditMode>("view");
+  const [editingRecurring, setEditingRecurring] = useState<EditingRecurring | null>(null);
+  const [savingRecurringEdit, setSavingRecurringEdit] = useState(false);
+  const [viewingAvailability, setViewingAvailability] = useState<{
+    start: dayjs.Dayjs;
+    end: dayjs.Dayjs;
+  } | null>(null);
+
+  // Personal availability editing (click-edit, drag-edit, the mode toggle)
+  // is only allowed in the aggregate view ("My Calendar", cohortId absent) —
+  // which also covers the Settings → Availability embed, since that always
+  // renders with no cohortId too. A specific cohort's calendar still shows
+  // the Personal layer for context (so you can see your own availability
+  // alongside that cohort's events), but it's read-only there — editing
+  // your own schedule from inside someone else's cohort view doesn't make
+  // sense as a place to do it. Forcing the *effective* mode to "view" here
+  // (rather than only hiding the toggle button) is deliberate defense in
+  // depth — hiding the toggle stops new mode changes, but doesn't protect
+  // against stale mode state if this component ever received a changed
+  // cohortId prop without a full remount.
+  const personalEditingAllowed = !cohortId;
+  const effectiveAvailabilityEditMode: AvailabilityEditMode = personalEditingAllowed
+    ? availabilityEditMode
+    : "view";
+
+  // Moved inside the component (from module scope) specifically so this can
+  // close over availabilityEditMode — renderEvent's call signature is just
+  // (event) => ReactNode, with no way to thread extra context through the
+  // prop itself, so closure is the only option for mode-aware styling. Must
+  // sit after the useState calls above — it depends on availabilityEditMode
+  // (via effectiveAvailabilityEditMode), and referencing that before its own
+  // useState line executes throws a "Cannot access before initialization"
+  // TDZ error (confirmed the hard way).
+  const renderCalendarEvent = useCallback(
+    (event: CalendarEvent) => {
+      const data = getEventData(event);
+      if (data.layer === "personal") {
+        const source = data.source ?? "recurring";
+        // Dimmed = this block's source doesn't match the active edit mode.
+        // In "view" mode nothing is dimmed — there's no active edit to be
+        // mismatched against yet, just informational display.
+        const dimmed =
+          effectiveAvailabilityEditMode !== "view" && effectiveAvailabilityEditMode !== source;
+        return (
+          <div
+            style={{
+              border: dimmed ? "1.5px dotted #cbd5e1" : "1.5px dashed #94a3b8",
+              background: dimmed ? "rgba(148, 163, 184, 0.06)" : "transparent",
+              borderRadius: 4,
+              padding: "2px 6px",
+              fontSize: 12,
+              color: dimmed ? "#cbd5e1" : "#475569",
+              height: "100%",
+              boxSizing: "border-box",
+              overflow: "hidden",
+              cursor: dimmed ? "not-allowed" : undefined,
+            }}
+          >
+            Available
+          </div>
+        );
+      }
+      return (
+        <div
+          style={{
+            background: event.backgroundColor ?? hexToRgba(GROUP_COLOR, 0.14),
+            borderLeft: `3px solid ${event.color ?? GROUP_COLOR}`,
+            color: event.color ?? GROUP_COLOR,
+            fontWeight: 600,
+            borderRadius: 4,
+            padding: "2px 6px",
+            fontSize: 12,
+            height: "100%",
+            boxSizing: "border-box",
+            overflow: "hidden",
+            whiteSpace: "nowrap",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {event.title}
+        </div>
+      );
+    },
+    [effectiveAvailabilityEditMode]
+  );
+
   function closeModal() {
     setSelectedEvent(null);
     setEditing(false);
     setCreatingNew(false);
   }
 
-  function openCreateModal() {
+  function openCreateModal(range?: { start: dayjs.Dayjs; end: dayjs.Dayjs }) {
     if (!cohortId) return;
-    const start = dayjs().add(1, "hour").startOf("hour");
+    const start = range?.start ?? dayjs().add(1, "hour").startOf("hour");
+    const end = range?.end ?? start.add(1, "hour");
     setEditTitle("");
     setEditDescription("");
     setEditLocation("");
     setEditStart(start.format("YYYY-MM-DDTHH:mm"));
-    setEditEnd(start.add(1, "hour").format("YYYY-MM-DDTHH:mm"));
+    setEditEnd(end.format("YYYY-MM-DDTHH:mm"));
     setEditColor(COLOR_PRESETS[0]);
     setEditChatGraceHours(0);
     setSelectedEvent(null);
@@ -479,14 +581,168 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
     }
   }, [cohortId, currentUserId, editTitle, editDescription, editLocation, editStart, editEnd, editColor]);
 
+  /**
+   * Drag/resize on a personal availability block, gated by the active edit
+   * mode (see AvailabilityEditMode). A block whose source doesn't match the
+   * active mode gets no interaction at all — silently reverts, no toast —
+   * matching the dimmed visual treatment in renderCalendarEvent, which is
+   * what communicates "not editable right now" rather than a message on
+   * every attempted drag. "view" mode reverts everything, but does surface
+   * a one-time-per-attempt hint toast, since there's no dimming to lean on
+   * when no mode is active yet.
+   *
+   * Scoped deliberately within each matching mode: only days with exactly
+   * one resolved block of that source are draggable — a day with several
+   * overlapping windows of the same type has no safe way to know *which*
+   * displayed block was grabbed without deeper provenance tracking than
+   * resolveAvailableBlocks carries today. Those stay revert-on-drop, same
+   * mechanism, pointing at click-to-edit instead.
+   *
+   * A successful drag in "oneoff" mode creates/replaces a one-off override
+   * for that specific date — never the recurring pattern. A successful drag
+   * in "recurring" mode updates the underlying recurring rule directly,
+   * which affects every matching weekday going forward, not just this date
+   * — that's the whole point of choosing Recurring mode explicitly rather
+   * than it happening by accident.
+   */
+  const handlePersonalDrag = useCallback(
+    async (updated: CalendarEvent, original: PocCalendarEvent | undefined) => {
+      const data = getEventData(updated);
+      const source = data.source ?? "recurring";
+      const eventId = String(updated.id);
+      const newStart = dayjs(updated.start);
+      const newEnd = dayjs(updated.end);
+      const alreadyAtOriginal =
+        !!original && newStart.isSame(original.start) && newEnd.isSame(original.end);
+
+      // Same lesson as the group-event revert fix earlier this session:
+      // calling ilamyApiRef.current.updateEvent() re-fires this same
+      // callback as a notification of the correction — if the incoming
+      // position already matches `original`, this call *is* that
+      // notification, so do nothing instead of correcting again.
+      function silentRevert() {
+        if (alreadyAtOriginal) return;
+        if (original) {
+          ilamyApiRef.current?.updateEvent(eventId, { start: original.start, end: original.end });
+        }
+      }
+
+      // Mode/source mismatch — no interaction, per the edit-mode toggle
+      // design. The dimmed styling already told the user this block isn't
+      // editable right now; no need to also toast on every attempt. Also
+      // covers the cohort-scoped case: effectiveAvailabilityEditMode is
+      // forced to "view" whenever personalEditingAllowed is false, so this
+      // branch (or the "view" branch just below) always wins there
+      // regardless of whatever availabilityEditMode's raw state happens
+      // to hold.
+      if (effectiveAvailabilityEditMode !== "view" && effectiveAvailabilityEditMode !== source) {
+        silentRevert();
+        return;
+      }
+
+      if (effectiveAvailabilityEditMode === "view") {
+        if (!alreadyAtOriginal) {
+          silentRevert();
+          if (personalEditingAllowed) {
+            showErrorToast('Turn on "Edit: Recurring" or "Edit: One-off" above to drag availability blocks.');
+          }
+          // No toast in the cohort-scoped case — there's no toggle to point
+          // at here, so a hint would be misleading; the silent revert alone
+          // is correct.
+        }
+        return;
+      }
+
+      if (alreadyAtOriginal) return;
+
+      if (effectiveAvailabilityEditMode === "recurring") {
+        const dow = newStart.day();
+        const rowsForDay = recurring.filter((r) => r.day_of_week === dow);
+        if (rowsForDay.length !== 1) {
+          silentRevert();
+          showErrorToast(
+            "This day has more than one recurring rule — edit it from Settings → Availability instead."
+          );
+          return;
+        }
+        try {
+          await updateRecurringAvailability(rowsForDay[0].id, {
+            start_time: newStart.format("HH:mm:ss"),
+            end_time: newEnd.format("HH:mm:ss"),
+          });
+          const rows = await fetchRecurringAvailability();
+          setRecurring(rows);
+        } catch (err) {
+          console.error("Failed to update recurring availability:", err);
+          silentRevert();
+          showErrorToast("Couldn't save that change. Try again.");
+        }
+        return;
+      }
+
+      // effectiveAvailabilityEditMode === "oneoff"
+      if (!currentUserId) {
+        silentRevert();
+        return;
+      }
+      const date = newStart.format("YYYY-MM-DD");
+      const dayBlockCount = personalEvents.filter(
+        (e) => dayjs(e.start).format("YYYY-MM-DD") === date
+      ).length;
+      if (dayBlockCount > 1) {
+        silentRevert();
+        showErrorToast("This day has more than one availability window — click it instead to edit them.");
+        return;
+      }
+      try {
+        const existingForDate = overrides.filter((o) => o.override_date === date);
+        for (const row of existingForDate) {
+          await deleteAvailabilityOverride(row.id);
+        }
+        await insertAvailabilityOverride({
+          user_id: currentUserId,
+          override_date: date,
+          start_time: newStart.format("HH:mm:ss"),
+          end_time: newEnd.format("HH:mm:ss"),
+          timezone: dayjs.tz.guess(),
+          is_available: true,
+        });
+        const rows = await fetchAvailabilityOverrides(
+          visibleRange.start.format("YYYY-MM-DD"),
+          visibleRange.end.format("YYYY-MM-DD")
+        );
+        setOverrides(rows);
+      } catch (err) {
+        console.error("Failed to save dragged availability:", err);
+        silentRevert();
+        showErrorToast("Couldn't save that change. Try again.");
+      }
+    },
+    [
+      effectiveAvailabilityEditMode,
+      personalEditingAllowed,
+      recurring,
+      personalEvents,
+      currentUserId,
+      overrides,
+      visibleRange,
+    ]
+  );
+
   const handleEventUpdate = useCallback(
     async (updated: CalendarEvent) => {
       const data = getEventData(updated);
       const eventId = String(updated.id);
       const original = [...groupEvents, ...personalEvents].find((e) => String(e.id) === eventId);
+
+      if (data.layer === "personal") {
+        await handlePersonalDrag(updated, original);
+        return;
+      }
+
       // Only group events have a real "completed" concept — personal
       // availability blocks aren't calendar commitments with an end state.
-      const completed = data.layer === "group" && !!original && hasEnded(original.end);
+      const completed = !!original && hasEnded(original.end);
 
       if (!data.editable || completed) {
         const updatedStart = dayjs(updated.start);
@@ -552,15 +808,17 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
         }
       }
     },
-    [groupEvents, personalEvents]
+    [groupEvents, personalEvents, handlePersonalDrag]
   );
 
   const handleEventAdd = useCallback(
     async (added: CalendarEvent) => {
       // events.cohort_id is NOT NULL — there's no valid cohort to attach a
-      // new event to on the aggregate view. isCellDisabled (wired below)
-      // should already prevent reaching this in that case; this is a second
-      // guard, not the primary defense.
+      // new event to on the aggregate view. This is now the only guard
+      // against that (isCellDisabled was removed — cells need to stay
+      // clickable in aggregate view for inline availability editing, and
+      // this check alone is sufficient since drag-select-to-create routes
+      // through this same handler regardless of cell state).
       if (!cohortId || !currentUserId) {
         console.warn("Blocked event creation: no cohort context.", { cohortId, currentUserId });
         setError("Open a specific cohort's calendar to create events.");
@@ -616,10 +874,6 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
     [cohortId, currentUserId]
   );
 
-  const isCellDisabled = useMemo(() => {
-    return cohortId ? undefined : () => true;
-  }, [cohortId]);
-
   const handleDateChange = useCallback(
     (_date: dayjs.Dayjs, range: { start: dayjs.Dayjs; end: dayjs.Dayjs }) => {
       setVisibleRange({ start: range.start, end: range.end });
@@ -627,21 +881,218 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
     []
   );
 
-  const handleEventClick = useCallback((clicked: CalendarEvent) => {
-    const data = getEventData(clicked);
-    setSelectedEvent({
-      id: String(clicked.id),
-      title: clicked.title,
-      start: dayjs(clicked.start),
-      end: dayjs(clicked.end),
-      color: (clicked.color as string | undefined) ?? GROUP_COLOR,
-      backgroundColor: (clicked.backgroundColor as string | undefined) ?? GROUP_COLOR,
-      data,
-    });
-    setEditing(false);
-    setCreatingNew(false);
-    setModalTab("details");
-  }, []);
+  const handleEventClick = useCallback(
+    (clicked: CalendarEvent) => {
+      const data = getEventData(clicked);
+      if (data.layer === "personal") {
+        if (!personalEditingAllowed) {
+          // A specific cohort's calendar — availability is shown for
+          // context, not editable here. Read-only info only.
+          setViewingAvailability({ start: dayjs(clicked.start), end: dayjs(clicked.end) });
+          return;
+        }
+
+        const source = data.source ?? "recurring";
+        const mismatched =
+          effectiveAvailabilityEditMode !== "view" && effectiveAvailabilityEditMode !== source;
+        if (mismatched) return; // no interaction — matches drag's gating
+
+        if (source === "recurring") {
+          const dow = dayjs(clicked.start).day();
+          const rowsForDay = recurring.filter((r) => r.day_of_week === dow);
+          if (rowsForDay.length !== 1) {
+            showErrorToast(
+              "This day has more than one recurring rule — edit it from Settings → Availability instead."
+            );
+            return;
+          }
+          const row = rowsForDay[0];
+          setEditingRecurring({
+            dayOfWeek: dow,
+            rowId: row.id,
+            start: row.start_time.slice(0, 5),
+            end: row.end_time.slice(0, 5),
+          });
+          return;
+        }
+
+        const date = dayjs(clicked.start).format("YYYY-MM-DD");
+        setEditingAvailability({
+          date,
+          start: dayjs(clicked.start).format("HH:mm"),
+          end: dayjs(clicked.end).format("HH:mm"),
+          hasExistingOverrides: overrides.some((o) => o.override_date === date),
+        });
+        return;
+      }
+      setSelectedEvent({
+        id: String(clicked.id),
+        title: clicked.title,
+        start: dayjs(clicked.start),
+        end: dayjs(clicked.end),
+        color: (clicked.color as string | undefined) ?? GROUP_COLOR,
+        backgroundColor: (clicked.backgroundColor as string | undefined) ?? GROUP_COLOR,
+        data,
+      });
+      setEditing(false);
+      setCreatingNew(false);
+      setModalTab("details");
+    },
+    [overrides, recurring, personalEditingAllowed, effectiveAvailabilityEditMode]
+  );
+
+  // Branches on cohortId: a specific cohort's calendar creates a group
+  // event (unchanged behavior); the aggregate "My Calendar" view has no
+  // cohort to attach an event to, so an empty-cell click there starts
+  // adding an availability window instead.
+  const handleCellClick = useCallback(
+    (info: CellInfo) => {
+      if (cohortId) {
+        openCreateModal({ start: info.start, end: info.end });
+        return;
+      }
+      const date = info.start.format("YYYY-MM-DD");
+      setEditingAvailability({
+        date,
+        start: info.start.format("HH:mm"),
+        end: info.end.format("HH:mm"),
+        hasExistingOverrides: overrides.some((o) => o.override_date === date),
+      });
+    },
+    [cohortId, overrides]
+  );
+
+  const handleAddAvailabilityWindow = useCallback(async () => {
+    if (!editingAvailability || !currentUserId) return;
+    setSavingAvailability(true);
+    setError(null);
+    try {
+      await insertAvailabilityOverride({
+        user_id: currentUserId,
+        override_date: editingAvailability.date,
+        start_time: `${editingAvailability.start}:00`,
+        end_time: `${editingAvailability.end}:00`,
+        timezone: dayjs.tz.guess(),
+        is_available: true,
+      });
+      const rows = await fetchAvailabilityOverrides(
+        visibleRange.start.format("YYYY-MM-DD"),
+        visibleRange.end.format("YYYY-MM-DD")
+      );
+      setOverrides(rows);
+      setEditingAvailability(null);
+    } catch (err) {
+      console.error("Failed to add availability window:", err);
+      const message = err instanceof Error ? err.message : "Couldn't save that. Try again.";
+      setError(message);
+      showErrorToast(message);
+    } finally {
+      setSavingAvailability(false);
+    }
+  }, [editingAvailability, currentUserId, visibleRange]);
+
+  const handleMarkDayUnavailable = useCallback(async () => {
+    if (!editingAvailability || !currentUserId) return;
+    setSavingAvailability(true);
+    setError(null);
+    try {
+      // Clear any existing overrides for this date first, so the resulting
+      // whole-day is_available:false row is the only one — deliberately
+      // avoids the same-day multi-override ordering ambiguity in
+      // resolveAvailableBlocks rather than risking it.
+      const existing = overrides.filter((o) => o.override_date === editingAvailability.date);
+      for (const row of existing) {
+        await deleteAvailabilityOverride(row.id);
+      }
+      await insertAvailabilityOverride({
+        user_id: currentUserId,
+        override_date: editingAvailability.date,
+        start_time: null,
+        end_time: null,
+        timezone: dayjs.tz.guess(),
+        is_available: false,
+      });
+      const rows = await fetchAvailabilityOverrides(
+        visibleRange.start.format("YYYY-MM-DD"),
+        visibleRange.end.format("YYYY-MM-DD")
+      );
+      setOverrides(rows);
+      setEditingAvailability(null);
+    } catch (err) {
+      console.error("Failed to mark day unavailable:", err);
+      const message = err instanceof Error ? err.message : "Couldn't save that. Try again.";
+      setError(message);
+      showErrorToast(message);
+    } finally {
+      setSavingAvailability(false);
+    }
+  }, [editingAvailability, currentUserId, overrides, visibleRange]);
+
+  const handleResetAvailability = useCallback(async () => {
+    if (!editingAvailability) return;
+    setSavingAvailability(true);
+    setError(null);
+    try {
+      const existing = overrides.filter((o) => o.override_date === editingAvailability.date);
+      for (const row of existing) {
+        await deleteAvailabilityOverride(row.id);
+      }
+      const rows = await fetchAvailabilityOverrides(
+        visibleRange.start.format("YYYY-MM-DD"),
+        visibleRange.end.format("YYYY-MM-DD")
+      );
+      setOverrides(rows);
+      setEditingAvailability(null);
+    } catch (err) {
+      console.error("Failed to reset availability:", err);
+      const message = err instanceof Error ? err.message : "Couldn't reset that. Try again.";
+      setError(message);
+      showErrorToast(message);
+    } finally {
+      setSavingAvailability(false);
+    }
+  }, [editingAvailability, overrides, visibleRange]);
+
+  const handleSaveRecurringEdit = useCallback(async () => {
+    if (!editingRecurring) return;
+    setSavingRecurringEdit(true);
+    setError(null);
+    try {
+      await updateRecurringAvailability(editingRecurring.rowId, {
+        start_time: `${editingRecurring.start}:00`,
+        end_time: `${editingRecurring.end}:00`,
+      });
+      const rows = await fetchRecurringAvailability();
+      setRecurring(rows);
+      setEditingRecurring(null);
+    } catch (err) {
+      console.error("Failed to save recurring availability:", err);
+      const message = err instanceof Error ? err.message : "Couldn't save that. Try again.";
+      setError(message);
+      showErrorToast(message);
+    } finally {
+      setSavingRecurringEdit(false);
+    }
+  }, [editingRecurring]);
+
+  const handleDeleteRecurringRule = useCallback(async () => {
+    if (!editingRecurring) return;
+    setSavingRecurringEdit(true);
+    setError(null);
+    try {
+      await deleteRecurringAvailability(editingRecurring.rowId);
+      const rows = await fetchRecurringAvailability();
+      setRecurring(rows);
+      setEditingRecurring(null);
+    } catch (err) {
+      console.error("Failed to remove recurring rule:", err);
+      const message = err instanceof Error ? err.message : "Couldn't remove that. Try again.";
+      setError(message);
+      showErrorToast(message);
+    } finally {
+      setSavingRecurringEdit(false);
+    }
+  }, [editingRecurring]);
 
   // Deep-link support: auto-open the event named in ?eventId= once it's
   // loaded (used by the sidebar's Upcoming Events widget). Only fires once
@@ -829,37 +1280,70 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
 
   return (
     <Card className="p-6">
-      <div className="flex items-center justify-between">
-        <h1 className="font-display text-xl">{headerTitle}</h1>
-        <div className="flex gap-2">
-          <Button
-            variant={visibleLayers.personal ? "primary" : "secondary"}
-            onClick={() => toggleLayer("personal")}
-          >
-            <span
-              className="mr-1.5 inline-block h-2 w-2 rounded-full"
-              style={{ backgroundColor: PERSONAL_COLOR }}
-            />
-            Personal
-          </Button>
-          <Button
-            variant={visibleLayers.group ? "primary" : "secondary"}
-            onClick={() => toggleLayer("group")}
-          >
-            <span
-              className="mr-1.5 inline-block h-2 w-2 rounded-full"
-              style={{ backgroundColor: GROUP_COLOR }}
-            />
-            Group
-          </Button>
-        </div>
-      </div>
+      {!hideHeader && (
+        <>
+          <div className="flex items-center justify-between">
+            <h1 className="font-display text-xl">{headerTitle}</h1>
+            <div className="flex gap-2">
+              <Button
+                variant={visibleLayers.personal ? "primary" : "secondary"}
+                onClick={() => toggleLayer("personal")}
+              >
+                <span
+                  className="mr-1.5 inline-block h-2 w-2 rounded-full"
+                  style={{ backgroundColor: PERSONAL_COLOR }}
+                />
+                Personal
+              </Button>
+              <Button
+                variant={visibleLayers.group ? "primary" : "secondary"}
+                onClick={() => toggleLayer("group")}
+              >
+                <span
+                  className="mr-1.5 inline-block h-2 w-2 rounded-full"
+                  style={{ backgroundColor: GROUP_COLOR }}
+                />
+                Group
+              </Button>
+            </div>
+          </div>
 
-      <p className="mt-2 text-sm text-[var(--color-ink-soft)]">
-        {cohortId
-          ? "Events for this cohort only."
-          : "Your availability, plus events across all your cohorts. Open a specific cohort's calendar to create new events."}
-      </p>
+          <p className="mt-2 text-sm text-[var(--color-ink-soft)]">
+            {cohortId
+              ? "Events for this cohort only. Your availability is shown for context, but only editable from My Calendar or Settings → Availability."
+              : "Your availability (click a slot to add or edit), plus events and RSVPs across all your cohorts — open a specific cohort's calendar to create new events."}
+          </p>
+        </>
+      )}
+
+      {personalEditingAllowed && visibleLayers.personal && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-xs text-[var(--color-ink-faint)]">Availability editing:</span>
+          <Button
+            variant={availabilityEditMode === "view" ? "primary" : "secondary"}
+            onClick={() => setAvailabilityEditMode("view")}
+          >
+            View only
+          </Button>
+          <Button
+            variant={availabilityEditMode === "recurring" ? "primary" : "secondary"}
+            onClick={() => setAvailabilityEditMode("recurring")}
+          >
+            Edit: Recurring
+          </Button>
+          <Button
+            variant={availabilityEditMode === "oneoff" ? "primary" : "secondary"}
+            onClick={() => setAvailabilityEditMode("oneoff")}
+          >
+            Edit: One-off
+          </Button>
+          {availabilityEditMode !== "view" && (
+            <span className="text-xs text-[var(--color-ink-faint)]">
+              Dimmed blocks below are the other type — switch modes to edit those instead.
+            </span>
+          )}
+        </div>
+      )}
 
       {error && (
         <p className="mt-2 text-sm text-[var(--color-danger)]" role="alert">
@@ -879,8 +1363,9 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
             onEventAdd={handleEventAdd}
             onEventUpdate={handleEventUpdate}
             onDateChange={handleDateChange}
-            isCellDisabled={isCellDisabled}
+            onCellClick={handleCellClick}
             scrollTime="08:00:00"
+            timeFormat={timeFormat}
             renderEvent={renderCalendarEvent}
             renderCurrentTimeIndicator={renderCurrentTimeIndicator}
             headerComponent={
@@ -961,22 +1446,6 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
                   </Button>
                   <Button variant="primary" onClick={handleCreateNew} disabled={savingEdit}>
                     {savingEdit ? "Saving…" : "Create"}
-                  </Button>
-                </div>
-              </>
-            ) : selectedEvent?.data.layer === "personal" ? (
-              <>
-                <h2 className="font-display text-lg">Available</h2>
-                <p className="mt-2 text-sm text-[var(--color-ink-soft)]">
-                  {selectedEvent.start.format("ddd, MMM D, h:mm A")} –{" "}
-                  {selectedEvent.end.format("h:mm A")}
-                </p>
-                <p className="mt-2 text-sm text-[var(--color-ink-faint)]">
-                  From your weekly pattern or an override. Manage this in Settings → Availability.
-                </p>
-                <div className="mt-4 flex justify-end">
-                  <Button variant="secondary" onClick={closeModal}>
-                    Close
                   </Button>
                 </div>
               </>
@@ -1146,6 +1615,11 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
             ) : selectedEvent ? (
               <>
                 <h2 className="font-display text-lg">Edit event</h2>
+                {selectedEvent.data.cohortName && (
+                  <p className="mt-0.5 text-xs text-[var(--color-ink-faint)]">
+                    {selectedEvent.data.cohortName as string}
+                  </p>
+                )}
                 <div className="mt-4 flex flex-col gap-3">
                   <div>
                     <Label>Title</Label>
@@ -1227,10 +1701,160 @@ export default function CohortCalendarPoc({ cohortId, initialEventId }: CohortCa
         </div>
       )}
 
+      {viewingAvailability && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setViewingAvailability(null)}
+        >
+          <Card className="w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+            <h2 className="font-display text-lg">Available</h2>
+            <p className="mt-2 text-sm text-[var(--color-ink-soft)]">
+              {viewingAvailability.start.format("ddd, MMM D, h:mm A")} –{" "}
+              {viewingAvailability.end.format("h:mm A")}
+            </p>
+            <p className="mt-2 text-sm text-[var(--color-ink-faint)]">
+              Manage your availability from My Calendar or Settings → Availability.
+            </p>
+            <div className="mt-4 flex justify-end">
+              <Button variant="secondary" onClick={() => setViewingAvailability(null)}>
+                Close
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {editingRecurring && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setEditingRecurring(null)}
+        >
+          <Card className="w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+            <h2 className="font-display text-lg">Edit recurring availability</h2>
+            <p className="mt-1 text-sm text-[var(--color-ink-soft)]">
+              Every {DAY_LABELS[editingRecurring.dayOfWeek]} — this changes your regular weekly
+              pattern, not just this one day.
+            </p>
+
+            <div className="mt-4 flex gap-2">
+              <div className="flex-1">
+                <Label>From</Label>
+                <Input
+                  type="time"
+                  value={editingRecurring.start}
+                  onChange={(e) =>
+                    setEditingRecurring((prev) => (prev ? { ...prev, start: e.target.value } : prev))
+                  }
+                />
+              </div>
+              <div className="flex-1">
+                <Label>Until</Label>
+                <Input
+                  type="time"
+                  value={editingRecurring.end}
+                  onChange={(e) =>
+                    setEditingRecurring((prev) => (prev ? { ...prev, end: e.target.value } : prev))
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => setEditingRecurring(null)}
+                disabled={savingRecurringEdit}
+              >
+                Cancel
+              </Button>
+              <Button variant="danger" onClick={handleDeleteRecurringRule} disabled={savingRecurringEdit}>
+                Remove this day
+              </Button>
+              <Button variant="primary" onClick={handleSaveRecurringEdit} disabled={savingRecurringEdit}>
+                {savingRecurringEdit ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {editingAvailability && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setEditingAvailability(null)}
+        >
+          <Card className="w-full max-w-md p-6" onClick={(e) => e.stopPropagation()}>
+            <h2 className="font-display text-lg">Edit availability</h2>
+            <p className="mt-1 text-sm text-[var(--color-ink-soft)]">
+              {dayjs(editingAvailability.date).format("dddd, MMM D, YYYY")}
+            </p>
+
+            <div className="mt-4 flex flex-col gap-3">
+              <div className="flex gap-2">
+                <div className="flex-1">
+                  <Label>New window: from</Label>
+                  <Input
+                    type="time"
+                    value={editingAvailability.start}
+                    onChange={(e) =>
+                      setEditingAvailability((prev) => (prev ? { ...prev, start: e.target.value } : prev))
+                    }
+                  />
+                </div>
+                <div className="flex-1">
+                  <Label>Until</Label>
+                  <Input
+                    type="time"
+                    value={editingAvailability.end}
+                    onChange={(e) =>
+                      setEditingAvailability((prev) => (prev ? { ...prev, end: e.target.value } : prev))
+                    }
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-[var(--color-ink-faint)]">
+                Adding a window here sets your availability for this one day — once you've added
+                anything for this date, it replaces your regular weekly pattern for just this day
+                (not other days). Add another window afterward if you want more than one range
+                today. You can also drag a block directly on the calendar while "Edit: One-off" is
+                selected above — or "Edit: Recurring" to change your regular weekly pattern instead.
+              </p>
+            </div>
+
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => setEditingAvailability(null)}
+                disabled={savingAvailability}
+              >
+                Cancel
+              </Button>
+              {editingAvailability.hasExistingOverrides && (
+                <Button variant="secondary" onClick={handleResetAvailability} disabled={savingAvailability}>
+                  Reset to usual schedule
+                </Button>
+              )}
+              <Button variant="danger" onClick={handleMarkDayUnavailable} disabled={savingAvailability}>
+                Mark whole day unavailable
+              </Button>
+              <Button variant="primary" onClick={handleAddAvailabilityWindow} disabled={savingAvailability}>
+                {savingAvailability ? "Saving…" : "Add window"}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      )}
+
       <ConfirmDialog
         open={deleteConfirmOpen}
         title="Delete this event?"
-        body="This can't be undone. Anyone who RSVP'd will lose access to it."
+        body={
+          selectedEvent?.data.cohortName
+            ? `This can't be undone. This deletes "${
+                (selectedEvent.data.rawTitle as string) ?? selectedEvent.title
+              }" from ${selectedEvent.data.cohortName as string} — anyone who RSVP'd will lose access to it.`
+            : "This can't be undone. Anyone who RSVP'd will lose access to it."
+        }
         confirmLabel={deleting ? "Deleting…" : "Delete"}
         cancelLabel="Cancel"
         onCancel={() => setDeleteConfirmOpen(false)}

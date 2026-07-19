@@ -100,6 +100,15 @@ export async function deleteRecurringAvailability(id: string): Promise<void> {
   if (error) throw error;
 }
 
+export async function updateRecurringAvailability(
+  id: string,
+  fields: Partial<{ start_time: string; end_time: string; day_of_week: number; timezone: string }>
+): Promise<void> {
+  const supabase = createClient();
+  const { error } = await supabase.from("availability_recurring").update(fields).eq("id", id);
+  if (error) throw error;
+}
+
 export interface NewAvailabilityOverrideInput {
   user_id: string;
   override_date: string;
@@ -130,11 +139,40 @@ export async function deleteAvailabilityOverride(id: string): Promise<void> {
 }
 
 /**
+ * Seeds a brand-new user with a default recurring pattern of "available
+ * 6am-10pm every day" — i.e. implicitly unavailable 10pm-6am nightly,
+ * achieved purely through the existing available-only recurring model with
+ * no schema change, per the calendar UI-pass decision to stay single-
+ * direction (available-only recurring rows; unavailable is just the gap).
+ *
+ * NOT WIRED to any call site yet — the actual signup/account-creation file
+ * wasn't available to edit safely, so this is a ready-to-call helper. Call
+ * it once, right after a new user's profile row is created.
+ *
+ * Uses the browser's detected timezone (dayjs.tz.guess()) since this runs
+ * client-side at signup time, same assumption as the rest of this file.
+ */
+export async function seedDefaultAvailability(userId: string): Promise<void> {
+  const tz = dayjs.tz.guess();
+  const inputs: NewRecurringAvailabilityInput[] = Array.from({ length: 7 }, (_, day_of_week) => ({
+    user_id: userId,
+    day_of_week,
+    start_time: "06:00:00",
+    end_time: "22:00:00",
+    timezone: tz,
+  }));
+  await Promise.all(inputs.map((input) => insertRecurringAvailability(input)));
+}
+
+/**
  * Subtracts `block` from each interval in `intervals`, splitting an interval
  * into two if the block falls entirely inside it, or trimming one edge if it
- * only overlaps partially. Runtime-verified against 4 scenarios (recurring
- * only, mid-window split, non-overlapping add, whole-day removal) before
- * this was written — see the accompanying test output.
+ * only overlaps partially. Still used within resolveAvailableBlocks, but now
+ * only ever applied within a single date's own override rows (is_available:
+ * false rows subtracting from is_available:true rows for that SAME date) —
+ * never across a date's overrides against another date's recurring baseline,
+ * which is what made the old cross-source subtraction order-dependent (see
+ * the comment in resolveAvailableBlocks below for why that mattered).
  */
 function subtractInterval(
   intervals: ResolvedInterval[],
@@ -156,11 +194,27 @@ function subtractInterval(
 
 /**
  * Resolves the recurring baseline + date-specific overrides into concrete
- * available intervals for the given range. Precedence: overrides always win
- * over the recurring baseline for the date they apply to (an `is_available:
- * true` override adds a window regardless of what recurring says; an
- * `is_available: false` override subtracts from whatever recurring produced,
- * even down to zero).
+ * available intervals for the given range.
+ *
+ * Precedence (rewritten): if ANY override exists for a given date, the
+ * recurring baseline is ignored ENTIRELY for that date — the day's resolved
+ * blocks come purely from that date's own override rows (is_available:true
+ * rows are added, is_available:false rows are then subtracted from those,
+ * in two clean passes). If no override exists for a date, the recurring
+ * baseline applies unchanged.
+ *
+ * This matches Calendly's actual, confirmed behavior (a date-specific
+ * override replaces the day's regular hours rather than layering on top of
+ * them) rather than the previous purely-additive/subtractive model, which
+ * had two problems: (1) it couldn't express "move this day's window from
+ * 9-5 to 6-8pm" without the old 9-5 also still showing, which is exactly
+ * what breaks drag-to-resize, and (2) same-day overrides were processed in
+ * whatever order the query returned them, so an add-then-subtract vs.
+ * subtract-then-add ordering could silently produce different results. The
+ * two-pass structure here (all adds, then all subtracts, always within one
+ * date's own overrides) is order-independent by construction — sequential
+ * subtraction of exclusion zones from an accumulated set doesn't depend on
+ * the order the subtractions are applied in.
  *
  * Each recurring/override row's own `timezone` is used to interpret its
  * wall-clock time into a real instant — not the browser's timezone — so
@@ -185,31 +239,42 @@ export function resolveAvailableBlocks(
 
   while (cursor.isBefore(rangeEnd)) {
     const dateKey = cursor.format("YYYY-MM-DD");
+    const todaysOverrides = overridesByDate.get(dateKey) ?? [];
     let dayBlocks: ResolvedInterval[] = [];
 
-    for (const row of recurring) {
-      const zonedDate = dayjs.tz(dateKey, row.timezone);
-      if (zonedDate.day() !== row.day_of_week) continue;
-      dayBlocks.push({
-        start: dayjs.tz(`${dateKey} ${row.start_time}`, row.timezone),
-        end: dayjs.tz(`${dateKey} ${row.end_time}`, row.timezone),
-      });
-    }
-
-    const todaysOverrides = overridesByDate.get(dateKey) ?? [];
-    for (const o of todaysOverrides) {
-      const wholeDay = !o.start_time || !o.end_time;
-      const oStart = wholeDay
-        ? dayjs.tz(dateKey, o.timezone).startOf("day")
-        : dayjs.tz(`${dateKey} ${o.start_time}`, o.timezone);
-      const oEnd = wholeDay
-        ? dayjs.tz(dateKey, o.timezone).endOf("day")
-        : dayjs.tz(`${dateKey} ${o.end_time}`, o.timezone);
-
-      if (o.is_available) {
+    if (todaysOverrides.length > 0) {
+      // Overrides exist for this date — they replace the recurring
+      // baseline entirely, rather than layering on top of it.
+      for (const o of todaysOverrides) {
+        if (!o.is_available) continue;
+        const wholeDay = !o.start_time || !o.end_time;
+        const oStart = wholeDay
+          ? dayjs.tz(dateKey, o.timezone).startOf("day")
+          : dayjs.tz(`${dateKey} ${o.start_time}`, o.timezone);
+        const oEnd = wholeDay
+          ? dayjs.tz(dateKey, o.timezone).endOf("day")
+          : dayjs.tz(`${dateKey} ${o.end_time}`, o.timezone);
         dayBlocks.push({ start: oStart, end: oEnd });
-      } else {
+      }
+      for (const o of todaysOverrides) {
+        if (o.is_available) continue;
+        const wholeDay = !o.start_time || !o.end_time;
+        const oStart = wholeDay
+          ? dayjs.tz(dateKey, o.timezone).startOf("day")
+          : dayjs.tz(`${dateKey} ${o.start_time}`, o.timezone);
+        const oEnd = wholeDay
+          ? dayjs.tz(dateKey, o.timezone).endOf("day")
+          : dayjs.tz(`${dateKey} ${o.end_time}`, o.timezone);
         dayBlocks = subtractInterval(dayBlocks, { start: oStart, end: oEnd });
+      }
+    } else {
+      for (const row of recurring) {
+        const zonedDate = dayjs.tz(dateKey, row.timezone);
+        if (zonedDate.day() !== row.day_of_week) continue;
+        dayBlocks.push({
+          start: dayjs.tz(`${dateKey} ${row.start_time}`, row.timezone),
+          end: dayjs.tz(`${dateKey} ${row.end_time}`, row.timezone),
+        });
       }
     }
 

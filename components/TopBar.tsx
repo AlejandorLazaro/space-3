@@ -81,6 +81,14 @@ export default function TopBar() {
                 className="absolute right-0 top-[calc(100%+6px)] z-10 min-w-[10rem] overflow-hidden p-1 shadow-md"
               >
                 <Link
+                  href="/calendar"
+                  role="menuitem"
+                  onClick={() => setMenuOpen(false)}
+                  className="flex w-full items-center justify-center rounded-md px-3 py-2 text-sm text-[var(--color-ink)] hover:bg-black/5"
+                >
+                  My Calendar
+                </Link>
+                <Link
                   href="/settings"
                   role="menuitem"
                   onClick={() => setMenuOpen(false)}
